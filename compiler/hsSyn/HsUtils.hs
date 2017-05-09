@@ -22,7 +22,7 @@ module HsUtils(
   -- Terms
   mkHsPar, mkHsApp, mkHsAppType, mkHsAppTypeOut, mkHsCaseAlt,
   mkSimpleMatch, unguardedGRHSs, unguardedRHS,
-  mkMatchGroup, mkMatch, mkHsLam, mkHsIf,
+  mkMatchGroup, mkMatch, mkPrefixFunRhs, mkHsLam, mkHsIf,
   mkHsWrap, mkLHsWrap, mkHsWrapCo, mkHsWrapCoR, mkLHsWrapCo,
   mkHsDictLet, mkHsLams,
   mkHsOpApp, mkHsDo, mkHsComp, mkHsWrapPat, mkHsWrapPatCo,
@@ -219,7 +219,7 @@ nlParPat p = noLoc (ParPat p)
 -- These are the bits of syntax that contain rebindable names
 -- See RnEnv.lookupSyntaxName
 
-mkHsIntegral   :: SourceText -> Integer -> PostTc RdrName Type
+mkHsIntegral   :: IntegralLit -> PostTc RdrName Type
                -> HsOverLit RdrName
 mkHsFractional :: FractionalLit -> PostTc RdrName Type -> HsOverLit RdrName
 mkHsIsString :: SourceText -> FastString -> PostTc RdrName Type
@@ -245,7 +245,7 @@ emptyRecStmtId   :: StmtLR Id   Id      bodyR
 mkRecStmt    :: [LStmtLR idL RdrName bodyR] -> StmtLR idL RdrName bodyR
 
 
-mkHsIntegral src i  = OverLit (HsIntegral   src i) noRebindableInfo noExpr
+mkHsIntegral     i  = OverLit (HsIntegral       i) noRebindableInfo noExpr
 mkHsFractional   f  = OverLit (HsFractional     f) noRebindableInfo noExpr
 mkHsIsString src s  = OverLit (HsIsString   src s) noRebindableInfo noExpr
 
@@ -377,6 +377,9 @@ nlHsDataCon con = noLoc (HsConLikeOut (RealDataCon con))
 nlHsLit :: HsLit -> LHsExpr id
 nlHsLit n = noLoc (HsLit n)
 
+nlHsIntLit :: Integer -> LHsExpr id
+nlHsIntLit n = noLoc (HsLit (HsInt (mkIntegralLit n)))
+
 nlVarPat :: id -> LPat id
 nlVarPat n = noLoc (VarPat (noLoc n))
 
@@ -397,9 +400,6 @@ nlHsSyntaxApps (SyntaxExpr { syn_expr      = fun
   | otherwise
   = mkLHsWrap res_wrap (foldl nlHsApp (noLoc fun) (zipWithEqual "nlHsSyntaxApps"
                                                      mkLHsWrap arg_wraps args))
-
-nlHsIntLit :: Integer -> LHsExpr id
-nlHsIntLit n = noLoc (HsLit (HsInt NoSourceText n))
 
 nlHsApps :: id -> [LHsExpr id] -> LHsExpr id
 nlHsApps f xs = foldl nlHsApp (nlHsVar f) xs
@@ -748,8 +748,12 @@ mk_easy_FunBind :: SrcSpan -> RdrName -> [LPat RdrName]
                 -> LHsExpr RdrName -> LHsBind RdrName
 mk_easy_FunBind loc fun pats expr
   = L loc $ mkFunBind (L loc fun)
-              [mkMatch (FunRhs (L loc fun) Prefix) pats expr
+              [mkMatch (mkPrefixFunRhs (L loc fun)) pats expr
                        (noLoc emptyLocalBinds)]
+
+-- | Make a prefix, non-strict function 'HsMatchContext'
+mkPrefixFunRhs :: Located id -> HsMatchContext id
+mkPrefixFunRhs n = FunRhs n Prefix NoSrcStrict
 
 ------------
 mkMatch :: HsMatchContext (NameOrRdrName id) -> [LPat id] -> LHsExpr id

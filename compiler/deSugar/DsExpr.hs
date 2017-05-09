@@ -200,7 +200,7 @@ dsUnliftedBind (FunBind { fun_id = L l fun
                         , fun_tick = tick }) body
                -- Can't be a bang pattern (that looks like a PatBind)
                -- so must be simply unboxed
-  = do { (args, rhs) <- matchWrapper (FunRhs (L l $ idName fun) Prefix)
+  = do { (args, rhs) <- matchWrapper (mkPrefixFunRhs (L l $ idName fun))
                                      Nothing matches
        ; MASSERT( null args ) -- Functions aren't lifted
        ; MASSERT( isIdHsWrapper co_fn )
@@ -277,12 +277,12 @@ ds_expr _ (HsWrap co_fn e)
        ; warnAboutIdentities dflags e' wrapped_ty
        ; return wrapped_e }
 
-ds_expr _ (NegApp (L loc (HsOverLit lit@(OverLit { ol_val = HsIntegral src i })))
+ds_expr _ (NegApp (L loc (HsOverLit lit@(OverLit { ol_val = HsIntegral i })))
                   neg_expr)
   = do { expr' <- putSrcSpanDs loc $ do
           { dflags <- getDynFlags
           ; warnAboutOverflowedLiterals dflags
-                                        (lit { ol_val = HsIntegral src (-i) })
+                                        (lit { ol_val = HsIntegral (negateIntegralLit i) })
           ; dsOverLit' dflags lit }
        ; dsSyntaxExpr neg_expr [expr'] }
 

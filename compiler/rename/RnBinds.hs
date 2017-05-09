@@ -456,21 +456,22 @@ rnBind _ bind@(PatBind { pat_lhs = pat
                 -- As well as dependency analysis, we need these for the
                 -- MonoLocalBinds test in TcBinds.decideGeneralisationPlan
               bndrs = collectPatBinders pat
-              bind' = bind { pat_rhs  = grhss',
-                             pat_rhs_ty = placeHolderType, bind_fvs = fvs' }
-              is_wild_pat = case pat of
-                              L _ (WildPat {})                 -> True
-                              L _ (BangPat (L _ (WildPat {}))) -> True -- #9127
-                              _                                -> False
+              bind' = bind { pat_rhs  = grhss'
+                           , pat_rhs_ty = placeHolderType, bind_fvs = fvs' }
 
-        -- Warn if the pattern binds no variables, except for the
-        -- entirely-explicit idiom    _ = rhs
-        -- which (a) is not that different from  _v = rhs
-        --       (b) is sometimes used to give a type sig for,
-        --           or an occurrence of, a variable on the RHS
+              ok_nobind_pat
+                  = -- See Note [Pattern bindings that bind no variables]
+                    case pat of
+                       L _ (WildPat {}) -> True
+                       L _ (BangPat {}) -> True -- #9127, #13646
+                       _                -> False
+
+        -- Warn if the pattern binds no variables
+        -- See Note [Pattern bindings that bind no variables]
         ; whenWOptM Opt_WarnUnusedPatternBinds $
-          when (null bndrs && not is_wild_pat) $
-          addWarn (Reason Opt_WarnUnusedPatternBinds) $ unusedPatBindWarn bind'
+          when (null bndrs && not ok_nobind_pat) $
+          addWarn (Reason Opt_WarnUnusedPatternBinds) $
+          unusedPatBindWarn bind'
 
         ; fvs' `seq` -- See Note [Free-variable space leak]
           return (bind', bndrs, all_fvs) }
@@ -482,7 +483,7 @@ rnBind sig_fn bind@(FunBind { fun_id = name
 
         ; (matches', rhs_fvs) <- bindSigTyVarsFV (sig_fn plain_name) $
                                 -- bindSigTyVars tests for LangExt.ScopedTyVars
-                                 rnMatchGroup (FunRhs name Prefix)
+                                 rnMatchGroup (mkPrefixFunRhs name)
                                               rnLExpr matches
         ; let is_infix = isInfixFunBind bind
         ; when is_infix $ checkPrecMatch plain_name matches'
@@ -505,7 +506,24 @@ rnBind sig_fn (PatSynBind bind)
 
 rnBind _ b = pprPanic "rnBind" (ppr b)
 
-{-
+{- Note [Pattern bindings that bind no variables]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Generally, we want to warn about pattern bindings like
+  Just _ = e
+because they don't do anything!  But we have two exceptions:
+
+* A wildcard pattern
+       _ = rhs
+  which (a) is not that different from  _v = rhs
+        (b) is sometimes used to give a type sig for,
+            or an occurrence of, a variable on the RHS
+
+* A strict patten binding; that is, one with an outermost bang
+     !Just _ = e
+  This can fail, so unlike the lazy variant, it is not a no-op.
+  Moreover, Trac #13646 argues that even for single constructor
+  types, you might want to write the constructor.  See also #9127.
+
 Note [Free-variable space leak]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 We have
@@ -667,7 +685,7 @@ rnPatSynBind sig_fn bind@(PSB { psb_id = L l name
             ImplicitBidirectional -> return (ImplicitBidirectional, emptyFVs)
             ExplicitBidirectional mg ->
                 do { (mg', fvs) <- bindSigTyVarsFV sig_tvs $
-                                   rnMatchGroup (FunRhs (L l name) Prefix)
+                                   rnMatchGroup (mkPrefixFunRhs (L l name))
                                                 rnLExpr mg
                    ; return (ExplicitBidirectional mg', fvs) }
 
@@ -1148,8 +1166,8 @@ rnMatch' ctxt rnBody match@(Match { m_ctxt = mf, m_pats = pats
         ; rnPats ctxt pats      $ \ pats' -> do
         { (grhss', grhss_fvs) <- rnGRHSs ctxt rnBody grhss
         ; let mf' = case (ctxt,mf) of
-                      (FunRhs (L _ funid) _,FunRhs (L lf _) _)
-                                            -> FunRhs (L lf funid) fixity
+                      (FunRhs (L _ funid) _ _,FunRhs (L lf _) _ _)
+                                            -> FunRhs (L lf funid) fixity NoSrcStrict -- TODO: Is this right?
                       _                     -> ctxt
         ; return (Match { m_ctxt = mf', m_pats = pats'
                         , m_type = Nothing, m_grhss = grhss'}, grhss_fvs ) }}

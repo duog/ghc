@@ -607,8 +607,9 @@ gen_Enum_binds loc tycon = do
                                nlHsVarApps intDataCon_RDR [ah_RDR]])
              (illegal_Expr "pred" occ_nm "tried to take `pred' of first tag in enumeration")
              (nlHsApp (nlHsVar (tag2con_RDR dflags tycon))
-                           (nlHsApps plus_RDR [nlHsVarApps intDataCon_RDR [ah_RDR],
-                                           nlHsLit (HsInt NoSourceText (-1))]))
+                      (nlHsApps plus_RDR
+                                [ nlHsVarApps intDataCon_RDR [ah_RDR]
+                                , nlHsLit (HsInt (mkIntegralLit (-1 :: Int)))]))
 
     to_enum dflags
       = mk_easy_FunBind loc toEnum_RDR [a_Pat] $
@@ -1125,7 +1126,7 @@ gen_Show_binds get_fixity loc tycon
       | otherwise   =
          ([a_Pat, con_pat],
           showParen_Expr (genOpApp a_Expr ge_RDR
-                              (nlHsLit (HsInt NoSourceText con_prec_plus_one)))
+                              (nlHsLit (HsInt (mkIntegralLit con_prec_plus_one))))
                          (nlHsPar (nested_compose_Expr show_thingies)))
         where
              data_con_RDR  = getRdrName data_con
@@ -1209,7 +1210,7 @@ mk_showString_app str = nlHsApp (nlHsVar showString_RDR) (nlHsLit (mkHsString st
 -- | showsPrec :: Show a => Int -> a -> ShowS
 mk_showsPrec_app :: Integer -> LHsExpr RdrName -> LHsExpr RdrName
 mk_showsPrec_app p x
-  = nlHsApps showsPrec_RDR [nlHsLit (HsInt NoSourceText p), x]
+  = nlHsApps showsPrec_RDR [nlHsLit (HsInt (mkIntegralLit p)), x]
 
 -- | shows :: Show a => a -> ShowS
 mk_shows_app :: LHsExpr RdrName -> LHsExpr RdrName
@@ -1509,7 +1510,7 @@ makeG_d.
 gen_Lift_binds :: SrcSpan -> TyCon -> (LHsBinds RdrName, BagDerivStuff)
 gen_Lift_binds loc tycon
   | null data_cons = (unitBag (L loc $ mkFunBind (L loc lift_RDR)
-                       [mkMatch (FunRhs (L loc lift_RDR) Prefix)
+                       [mkMatch (mkPrefixFunRhs (L loc lift_RDR))
                                         [nlWildPat] errorMsg_Expr
                                         (noLoc emptyLocalBinds)])
                      , emptyBag)
@@ -1654,7 +1655,7 @@ gen_Newtype_binds loc cls inst_tvs inst_tys rhs_ty
     mk_bind :: Id -> LHsBind RdrName
     mk_bind meth_id
       = mkRdrFunBind (L loc meth_RDR) [mkSimpleMatch
-                                          (FunRhs (L loc meth_RDR) Prefix)
+                                          (mkPrefixFunRhs (L loc meth_RDR))
                                           [] rhs_expr]
       where
         Pair from_ty to_ty = mkCoerceClassMethEqn cls inst_tvs inst_tys rhs_ty meth_id
@@ -1843,7 +1844,7 @@ mkFunBindSE :: Arity -> SrcSpan -> RdrName
 mkFunBindSE arity loc fun pats_and_exprs
   = mkRdrFunBindSE arity (L loc fun) matches
   where
-    matches = [mkMatch (FunRhs (L loc fun) Prefix) p e
+    matches = [mkMatch (mkPrefixFunRhs (L loc fun)) p e
                                (noLoc emptyLocalBinds)
               | (p,e) <-pats_and_exprs]
 
@@ -1873,7 +1874,7 @@ mkRdrFunBindEC arity catch_all
    -- which can happen with -XEmptyDataDecls
    -- See Trac #4302
    matches' = if null matches
-              then [mkMatch (FunRhs fun Prefix)
+              then [mkMatch (mkPrefixFunRhs fun)
                             (replicate (arity - 1) nlWildPat ++ [z_Pat])
                             (catch_all $ nlHsCase z_Expr [])
                             (noLoc emptyLocalBinds)]
@@ -1893,7 +1894,7 @@ mkRdrFunBindSE arity
    -- which can happen with -XEmptyDataDecls
    -- See Trac #4302
    matches' = if null matches
-              then [mkMatch (FunRhs fun Prefix)
+              then [mkMatch (mkPrefixFunRhs fun)
                             (replicate arity nlWildPat)
                             (error_Expr str) (noLoc emptyLocalBinds)]
               else matches
