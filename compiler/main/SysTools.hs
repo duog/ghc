@@ -9,7 +9,7 @@
 -}
 
 {-# LANGUAGE CPP, ScopedTypeVariables #-}
-
+{-# OPTIONS_GHC -fprof-auto #-}
 module SysTools (
         -- Initialisation
         initSysTools,

@@ -1,5 +1,5 @@
 {-# LANGUAGE CPP, NondecreasingIndentation, ScopedTypeVariables #-}
-
+{-# OPTIONS_GHC -fprof-auto #-}
 -- -----------------------------------------------------------------------------
 --
 -- (c) The University of Glasgow, 2005-2012
@@ -448,7 +448,7 @@ runGhcT mb_top_dir ghct = do
     withCleanupSession ghct
 
 withCleanupSession :: GhcMonad m => m a -> m a
-withCleanupSession ghc = ghc `gfinally` cleanup
+withCleanupSession ghc = ({-# SCC ghc #-}ghc) `gfinally` cleanup
   where
    cleanup = do
       hsc_env <- getSession
