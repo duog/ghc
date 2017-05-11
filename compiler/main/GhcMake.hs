@@ -130,6 +130,12 @@ depanal excluded_mods allow_dup_roots = do
               text "Chasing modules from: ",
               hcat (punctuate comma (map pprTarget targets))])
 
+    -- Home package modules may have been moved or deleted, and new
+    -- source files may have appeared in the home package that shadow
+    -- external package modules, so we have to discard the existing
+    -- cached finder data.
+    liftIO $ flushFinderCaches hsc_env
+
     mod_graphE <- liftIO $ downsweep hsc_env old_graph
                                      excluded_mods allow_dup_roots
     mod_graph <- reportImportErrors mod_graphE
@@ -220,8 +226,9 @@ load' how_much mHscMessage mod_graph = do
     -- B.hs-boot in the module graph, but no B.hs
     -- The downsweep should have ensured this does not happen
     -- (see msDeps)
-    let all_home_mods = [ms_mod_name s
-                        | s <- mod_graph, not (isBootSummary s)]
+    let all_home_mods =
+          mkUniqSet [ ms_mod_name s
+                    | s <- mod_graph, not (isBootSummary s)]
     -- TODO: Figure out what the correct form of this assert is. It's violated
     -- when you have HsBootMerge nodes in the graph: then you'll have hs-boot
     -- files without corresponding hs files.
@@ -236,7 +243,7 @@ load' how_much mHscMessage mod_graph = do
         checkHowMuch _ = id
 
         checkMod m and_then
-            | m `elem` all_home_mods = and_then
+            | m `elementOfUniqSet` all_home_mods = and_then
             | otherwise = do
                     liftIO $ errorMsg dflags (text "no such module:" <+>
                                      quotes (ppr m))
@@ -656,7 +663,7 @@ unload hsc_env stable_linkables -- Unload everthing *except* 'stable_linkables'
 checkStability
         :: HomePackageTable   -- HPT from last compilation
         -> [SCC ModSummary]   -- current module graph (cyclic)
-        -> [ModuleName]       -- all home modules
+        -> UniqSet ModuleName -- all home modules
         -> ([ModuleName],     -- stableObject
             [ModuleName])     -- stableBCO
 
@@ -669,7 +676,8 @@ checkStability hpt sccs all_home_mods = foldl checkSCC ([],[]) sccs
      where
         scc = flattenSCC scc0
         scc_mods = map ms_mod_name scc
-        home_module m   = m `elem` all_home_mods && m `notElem` scc_mods
+        home_module m =
+          m `elementOfUniqSet` all_home_mods && m `notElem` scc_mods
 
         scc_allimps = nub (filter home_module (concatMap ms_home_allimps scc))
             -- all imports outside the current SCC, but in the home pkg
@@ -1913,6 +1921,12 @@ summariseFile hsc_env old_summaries file mb_phase obj_allowed maybe_buf
                         then liftIO $ getObjTimestamp location NotBoot
                         else return Nothing
                   hi_timestamp <- maybeGetIfaceDate dflags location
+
+                  -- We have to repopulate the Finder's cache because it
+                  -- was flushed before the downsweep.
+                  _ <- liftIO $ addHomeModuleToFinder hsc_env
+                    (moduleName (ms_mod old_summary)) (ms_location old_summary)
+
                   return old_summary{ ms_obj_date = obj_timestamp
                                     , ms_iface_date = hi_timestamp }
            else
@@ -2032,11 +2046,6 @@ summariseModule hsc_env old_summary_map is_boot (L loc wanted_mod)
                 new_summary location (ms_mod old_summary) src_fn src_timestamp
 
     find_it = do
-        -- Don't use the Finder's cache this time.  If the module was
-        -- previously a package module, it may have now appeared on the
-        -- search path, so we want to consider it to be a home module.  If
-        -- the module was previously a home module, it may have moved.
-        uncacheModule hsc_env wanted_mod
         found <- findImportedModule hsc_env wanted_mod Nothing
         case found of
              Found location mod

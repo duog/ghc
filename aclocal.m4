@@ -20,14 +20,8 @@ AC_DEFUN([GHC_SELECT_FILE_EXTENSIONS],
         $2='.exe'
         $3='.dll'
         ;;
-    i386-apple-darwin|powerpc-apple-darwin)
-        $3='.dylib'
-        ;;
-    x86_64-apple-darwin)
-        $3='.dylib'
-        ;;
-    arm-apple-darwin10|i386-apple-darwin11|aarch64-apple-darwin14|x86_64-apple-darwin14)
-        $2='.a'
+    # apple platform uses .dylib (macOS, iOS, ...)
+    *-apple-*)
         $3='.dylib'
         ;;
     esac
@@ -142,9 +136,13 @@ AC_DEFUN([FPTOOLS_SET_PLATFORM_VARS],
     TargetVendor_CPP=`  echo "$TargetVendor"   | sed -e 's/\./_/g' -e 's/-/_/g'`
     TargetOS_CPP=`      echo "$TargetOS"       | sed -e 's/\./_/g' -e 's/-/_/g'`
 
+    # we intend to pass trough --targets to llvm as is.
+    LLVMTarget_CPP=`    echo "$target"`
+
     echo "GHC build  : $BuildPlatform"
     echo "GHC host   : $HostPlatform"
     echo "GHC target : $TargetPlatform"
+    echo "LLVM target: $target"
 
     AC_SUBST(BuildPlatform)
     AC_SUBST(HostPlatform)
@@ -160,6 +158,7 @@ AC_DEFUN([FPTOOLS_SET_PLATFORM_VARS],
     AC_SUBST(HostOS_CPP)
     AC_SUBST(BuildOS_CPP)
     AC_SUBST(TargetOS_CPP)
+    AC_SUBST(LLVMTarget_CPP)
 
     AC_SUBST(HostVendor_CPP)
     AC_SUBST(BuildVendor_CPP)
@@ -572,6 +571,7 @@ AC_DEFUN([FP_SET_CFLAGS_C99],
 # $5 is the name of the CPP flags variable
 AC_DEFUN([FPTOOLS_SET_C_LD_FLAGS],
 [
+    FIND_LD([$1],[UseLd])
     AC_MSG_CHECKING([Setting up $2, $3, $4 and $5])
     case $$1 in
     i386-*)
@@ -610,18 +610,14 @@ AC_DEFUN([FPTOOLS_SET_C_LD_FLAGS],
         ;;
     arm*linux*)
         # On arm/linux and arm/android, tell gcc to generate Arm
-        # instructions (ie not Thumb) and to link using the gold linker.
-        # Forcing LD to be ld.gold is done in FIND_LD m4 macro.
+        # instructions (ie not Thumb).
         $2="$$2 -marm"
-        $3="$$3 -fuse-ld=gold -Wl,-z,noexecstack"
+        $3="$$3 -Wl,-z,noexecstack"
         $4="$$4 -z noexecstack"
         ;;
 
     aarch64*linux*)
-        # On aarch64/linux and aarch64/android, tell gcc to link using the
-        # gold linker.
-        # Forcing LD to be ld.gold is done in FIND_LD m4 macro.
-        $3="$$3 -fuse-ld=gold -Wl,-z,noexecstack"
+        $3="$$3 -Wl,-z,noexecstack"
         $4="$$4 -z noexecstack"
         ;;
 
@@ -640,6 +636,15 @@ AC_DEFUN([FPTOOLS_SET_C_LD_FLAGS],
         $4="$$4 -z wxneeded"
         ;;
 
+    esac
+
+    case $UseLd in
+         *ld.gold)
+         $3="$$3 -fuse-ld=gold"
+         ;;
+         *ld.bfd)
+         $3="$$3 -fuse-ld=bfd"
+         ;;
     esac
 
     # If gcc knows about the stack protector, turn it off.
@@ -790,20 +795,17 @@ AC_CACHE_CHECK([leading underscore in symbol names], [fptools_cv_leading_undersc
 # Hack!: nlist() under Digital UNIX insist on there being an _,
 # but symbol table listings shows none. What is going on here?!?
 case $TargetPlatform in
-*linux-android*) fptools_cv_leading_underscore=no;;
-*openbsd*) # x86 openbsd is ELF from 3.4 >, meaning no leading uscore
-  case $build in
-    i386-*2\.@<:@0-9@:>@ | i386-*3\.@<:@0-3@:>@ ) fptools_cv_leading_underscore=yes ;;
-    *) fptools_cv_leading_underscore=no ;;
-  esac ;;
-i386-unknown-mingw32) fptools_cv_leading_underscore=yes;;
-x86_64-unknown-mingw32) fptools_cv_leading_underscore=no;;
-
-    # HACK: Apple doesn't seem to provide nlist in the 64-bit-libraries
-x86_64-apple-darwin*) fptools_cv_leading_underscore=yes;;
-*-apple-ios) fptools_cv_leading_underscore=yes;;
-
-*) AC_RUN_IFELSE([AC_LANG_SOURCE([[#ifdef HAVE_NLIST_H
+    # Apples mach-o platforms use leading underscores
+    *-apple-*) fptools_cv_leading_underscore=yes;;
+    *linux-android*) fptools_cv_leading_underscore=no;;
+    *openbsd*) # x86 openbsd is ELF from 3.4 >, meaning no leading uscore
+      case $build in
+        i386-*2\.@<:@0-9@:>@ | i386-*3\.@<:@0-3@:>@ ) fptools_cv_leading_underscore=yes ;;
+        *) fptools_cv_leading_underscore=no ;;
+      esac ;;
+    i386-unknown-mingw32) fptools_cv_leading_underscore=yes;;
+    x86_64-unknown-mingw32) fptools_cv_leading_underscore=no;;
+    *) AC_RUN_IFELSE([AC_LANG_SOURCE([[#ifdef HAVE_NLIST_H
 #include <nlist.h>
 struct nlist xYzzY1[] = {{"xYzzY1", 0},{0}};
 struct nlist xYzzY2[] = {{"_xYzzY2", 0},{0}};
@@ -1139,7 +1141,7 @@ AC_DEFUN([FP_PROG_AR_NEEDS_RANLIB],[
     if test $fp_prog_ar_is_gnu = yes
     then
         fp_cv_prog_ar_needs_ranlib=no
-    elif test "$TargetOS_CPP" = "darwin"
+    elif test "$TargetVendor_CPP" = "apple"
     then
         # It's quite tedious to check for Apple's crazy timestamps in
         # .a files, so we hardcode it.
@@ -1876,12 +1878,11 @@ AC_DEFUN([GHC_CONVERT_VENDOR],[
 # --------------------------------
 # converts os from gnu to ghc naming, and assigns the result to $target_var
 AC_DEFUN([GHC_CONVERT_OS],[
-case "$1-$2" in
-  darwin10-arm|darwin11-i386|darwin14-aarch64|darwin14-x86_64)
-    $3="ios"
-    ;;
-  *)
     case "$1" in
+      # watchos and tvos are ios variant as of May 2017.
+      ios|watchos|tvos)
+        $3="ios"
+        ;;
       linux-android*)
         $3="linux-android"
         ;;
@@ -1908,8 +1909,6 @@ case "$1-$2" in
         exit 1
         ;;
       esac
-      ;;
-  esac
 ])
 
 # BOOTSTRAPPING_GHC_INFO_FIELD
@@ -1941,7 +1940,7 @@ AC_SUBST(LIBRARY_[]translit([$1], [-], [_])[]_VERSION)
 # --------------------------------
 # Gets the version number of XCode, if on a Mac
 AC_DEFUN([XCODE_VERSION],[
-    if test "$TargetOS_CPP" = "darwin"
+    if test "$TargetVendor_CPP" = "apple"
     then
         AC_MSG_CHECKING(XCode version)
         XCodeVersion=`xcodebuild -version | grep Xcode | sed "s/Xcode //"`
@@ -1991,11 +1990,12 @@ AC_DEFUN([FIND_LLVM_PROG],[
 # Find the version of `ld` to use. This is used in both in the top level
 # configure.ac and in distrib/configure.ac.in.
 #
-# $1 = the variable to set
+# $1 = the platform
+# $2 = the variable to set
 #
 AC_DEFUN([FIND_LD],[
     AC_CHECK_TARGET_TOOL([LD], [ld])
-    case $target in
+    case $1 in
         arm*linux*       | \
         aarch64*linux*   )
             # Arm and Aarch64 requires use of the binutils ld.gold linker.
@@ -2003,10 +2003,18 @@ AC_DEFUN([FIND_LD],[
             # arm-linux-androideabi, arm64-unknown-linux and
             # aarch64-linux-android
             AC_CHECK_TARGET_TOOL([LD_GOLD], [ld.gold])
-            $1="$LD_GOLD"
+            if test "$LD_GOLD" != ""; then
+                $2="$LD_GOLD"
+            elif test `$LD --version | grep -c "GNU gold"` -gt 0; then
+                AC_MSG_NOTICE([ld is ld.gold])
+                $2="$LD"
+            else
+                AC_MSG_WARN([could not find ld.gold, falling back to $LD])
+                $2="$LD"
+            fi
             ;;
         *)
-            $1="$LD"
+            $2="$LD"
             ;;
     esac
 ])
