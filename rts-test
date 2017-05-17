@@ -1,0 +1,2 @@
+/opt/ghc/8.0.2/lib/ghc-8.0.2/bin/ghc -B/opt/ghc/8.0.2/lib/ghc-8.0.2 -e do {putStrLn$ show [1,2] ++ ("(\\haskell)")} +RTS -trts-test 
+<<ghc: 51830856 bytes, 59 GCs, 3062904/8012976 avg/max bytes residency (6 samples), 16M in use, 0.001 INIT (0.002 elapsed), 0.037 MUT (0.040 elapsed), 0.124 GC (0.126 elapsed) :ghc>>
