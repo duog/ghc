@@ -31,7 +31,7 @@ module InteractiveEval (
         typeKind,
         parseName,
         showModule,
-        isModuleInterpreted,
+        moduleIsBootOrNotObjectLinkable,
         parseExpr, compileParsedExpr,
         compileExpr, dynCompileExpr,
         compileExprRemote, compileParsedExprRemote,
@@ -782,14 +782,14 @@ isStmt :: DynFlags -> String -> Bool
 isStmt dflags stmt =
   case parseThing Parser.parseStmt dflags stmt of
     Lexer.POk _ _ -> True
-    Lexer.PFailed _ _ -> False
+    Lexer.PFailed _ _ _ -> False
 
 -- | Returns @True@ if passed string has an import declaration.
 hasImport :: DynFlags -> String -> Bool
 hasImport dflags stmt =
   case parseThing Parser.parseModule dflags stmt of
     Lexer.POk _ thing -> hasImports thing
-    Lexer.PFailed _ _ -> False
+    Lexer.PFailed _ _ _ -> False
   where
     hasImports = not . null . hsmodImports . unLoc
 
@@ -798,7 +798,7 @@ isImport :: DynFlags -> String -> Bool
 isImport dflags stmt =
   case parseThing Parser.parseImport dflags stmt of
     Lexer.POk _ _ -> True
-    Lexer.PFailed _ _ -> False
+    Lexer.PFailed _ _ _ -> False
 
 -- | Returns @True@ if passed string is a declaration but __/not a splice/__.
 isDecl :: DynFlags -> String -> Bool
@@ -808,7 +808,7 @@ isDecl dflags stmt = do
       case unLoc thing of
         SpliceD _ -> False
         _ -> True
-    Lexer.PFailed _ _ -> False
+    Lexer.PFailed _ _ _ -> False
 
 parseThing :: Lexer.P thing -> DynFlags -> String -> Lexer.ParseResult thing
 parseThing parser dflags stmt = do
@@ -901,17 +901,17 @@ dynCompileExpr expr = do
 showModule :: GhcMonad m => ModSummary -> m String
 showModule mod_summary =
     withSession $ \hsc_env -> do
-        interpreted <- isModuleInterpreted mod_summary
+        interpreted <- moduleIsBootOrNotObjectLinkable mod_summary
         let dflags = hsc_dflags hsc_env
         return (showModMsg dflags (hscTarget dflags) interpreted mod_summary)
 
-isModuleInterpreted :: GhcMonad m => ModSummary -> m Bool
-isModuleInterpreted mod_summary = withSession $ \hsc_env ->
+moduleIsBootOrNotObjectLinkable :: GhcMonad m => ModSummary -> m Bool
+moduleIsBootOrNotObjectLinkable mod_summary = withSession $ \hsc_env ->
   case lookupHpt (hsc_HPT hsc_env) (ms_mod_name mod_summary) of
         Nothing       -> panic "missing linkable"
-        Just mod_info -> return (not obj_linkable)
-                      where
-                         obj_linkable = isObjectLinkable (expectJust "showModule" (hm_linkable mod_info))
+        Just mod_info -> return $ case hm_linkable mod_info of
+          Nothing       -> True
+          Just linkable -> not (isObjectLinkable linkable)
 
 ----------------------------------------------------------------------------
 -- RTTI primitives
