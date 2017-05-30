@@ -155,6 +155,9 @@ module DynFlags (
         -- * Linker/compiler information
         LinkerInfo(..),
         CompilerInfo(..),
+
+        -- * File cleanup
+        FilesToClean(..), emptyFilesToClean
   ) where
 
 #include "HsVersions.h"
@@ -840,9 +843,8 @@ data DynFlags = DynFlags {
   -- Temporary files
   -- These have to be IORefs, because the defaultCleanupHandler needs to
   -- know what to clean when an exception happens
-  filesToClean          :: IORef [FilePath],
+  filesToClean          :: IORef FilesToClean,
   dirsToClean           :: IORef (Map FilePath FilePath),
-  filesToNotIntermediateClean :: IORef [FilePath],
   -- The next available suffix to uniquely name a temp file, updated atomically
   nextTempSuffix        :: IORef Int,
 
@@ -988,6 +990,7 @@ instance (Monad m, HasDynFlags m) => HasDynFlags (ExceptT e m) where
 
 class ContainsDynFlags t where
     extractDynFlags :: t -> DynFlags
+
 
 data ProfAuto
   = NoProfAuto         -- ^ no SCC annotations added
@@ -1504,9 +1507,8 @@ initDynFlags dflags = do
          = platformOS (targetPlatform dflags) /= OSMinGW32
  refCanGenerateDynamicToo <- newIORef platformCanGenerateDynamicToo
  refNextTempSuffix <- newIORef 0
- refFilesToClean <- newIORef []
+ refFilesToClean <- newIORef emptyFilesToClean
  refDirsToClean <- newIORef Map.empty
- refFilesToNotIntermediateClean <- newIORef []
  refGeneratedDumps <- newIORef Set.empty
  refRtldInfo <- newIORef Nothing
  refRtccInfo <- newIORef Nothing
@@ -1530,7 +1532,6 @@ initDynFlags dflags = do
         nextTempSuffix = refNextTempSuffix,
         filesToClean   = refFilesToClean,
         dirsToClean    = refDirsToClean,
-        filesToNotIntermediateClean = refFilesToNotIntermediateClean,
         generatedDumps = refGeneratedDumps,
         nextWrapperNum = wrapperNum,
         useUnicode    = canUseUnicode,
@@ -1647,7 +1648,6 @@ defaultDynFlags mySettings =
         nextTempSuffix = panic "defaultDynFlags: No nextTempSuffix",
         filesToClean   = panic "defaultDynFlags: No filesToClean",
         dirsToClean    = panic "defaultDynFlags: No dirsToClean",
-        filesToNotIntermediateClean = panic "defaultDynFlags: No filesToNotIntermediateClean",
         generatedDumps = panic "defaultDynFlags: No generatedDumps",
         haddockOptions = Nothing,
         dumpFlags = EnumSet.empty,
@@ -5326,3 +5326,24 @@ decodeSize str
 
 foreign import ccall unsafe "setHeapSize"       setHeapSize       :: Int -> IO ()
 foreign import ccall unsafe "enableTimingStats" enableTimingStats :: IO ()
+
+-- -----------------------------------------------------------------------------
+-- Types for managing temporary files.
+--
+-- these are here because FilesToClean is used in DynFlags
+
+-- | A collection of files that must be deleted before ghc exits.
+-- The current collection
+-- is stored in an IORef in DynFlags, 'filesToClean'.
+data FilesToClean = FilesToClean {
+  ftcGhcSession :: !(Set FilePath),
+  -- ^ Files that will be deleted at the end of runGhc(T)
+  ftcCurrentModule :: !(Set FilePath)
+  -- ^ Files that will be deleted the next time
+  -- 'FileCleanup.cleanCurrentModuleTempFiles' is called, or otherwise at the
+  -- end of the session.
+  }
+
+-- | An empty FilesToClean
+emptyFilesToClean :: FilesToClean
+emptyFilesToClean = FilesToClean Set.empty Set.empty

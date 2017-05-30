@@ -239,20 +239,20 @@ compiler/stage3/$(PLATFORM_H) : compiler/stage2/$(PLATFORM_H)
 #		from prelude/primops.txt
 
 PRIMOP_BITS_NAMES = primop-data-decl.hs-incl        \
-                    primop-tag.hs-incl              \
-                    primop-list.hs-incl             \
-                    primop-has-side-effects.hs-incl \
-                    primop-out-of-line.hs-incl      \
-                    primop-commutable.hs-incl       \
-                    primop-code-size.hs-incl        \
-                    primop-can-fail.hs-incl         \
-                    primop-strictness.hs-incl       \
-                    primop-fixity.hs-incl           \
-                    primop-primop-info.hs-incl      \
-                    primop-vector-uniques.hs-incl   \
-                    primop-vector-tys.hs-incl       \
-                    primop-vector-tys-exports.hs-incl \
-                    primop-vector-tycons.hs-incl
+										primop-tag.hs-incl              \
+										primop-list.hs-incl             \
+										primop-has-side-effects.hs-incl \
+										primop-out-of-line.hs-incl      \
+										primop-commutable.hs-incl       \
+										primop-code-size.hs-incl        \
+										primop-can-fail.hs-incl         \
+										primop-strictness.hs-incl       \
+										primop-fixity.hs-incl           \
+										primop-primop-info.hs-incl      \
+										primop-vector-uniques.hs-incl   \
+										primop-vector-tys.hs-incl       \
+										primop-vector-tys-exports.hs-incl \
+										primop-vector-tycons.hs-incl
 
 PRIMOP_BITS_STAGE1 = $(addprefix compiler/stage1/build/,$(PRIMOP_BITS_NAMES))
 PRIMOP_BITS_STAGE2 = $(addprefix compiler/stage2/build/,$(PRIMOP_BITS_NAMES))
@@ -478,6 +478,7 @@ compiler_stage2_dll0_MODULES = \
 	FastString \
 	FastStringEnv \
 	FieldLabel \
+	FileCleanup \
 	Fingerprint \
 	FiniteMap \
 	ForeignCall \
