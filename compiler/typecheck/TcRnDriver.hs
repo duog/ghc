@@ -234,8 +234,10 @@ tcRnModuleTcRnM hsc_env hsc_src
                        ++ map mkImport (raw_sig_imports ++ raw_req_imports) } ;
 
           -- OK now finally rename the imports
-        tcg_env <- {-# SCC "tcRnImports" #-}
-                   tcRnImports hsc_env all_imports ;
+        tcg_env <- do {
+            hpt <- readMutVar (hsc_HPT hsc_env);
+            {-# SCC "tcRnImports" #-}
+            tcRnImports hpt all_imports; } ;
 
           -- If the whole module is warned about or deprecated
           -- (via mod_deprec) record that in tcg_warns. If we do thereby add
@@ -304,8 +306,8 @@ implicitPreludeWarn
 ************************************************************************
 -}
 
-tcRnImports :: HscEnv -> [LImportDecl GhcPs] -> TcM TcGblEnv
-tcRnImports hsc_env import_decls
+tcRnImports :: HomePackageTable -> [LImportDecl GhcPs] -> TcM TcGblEnv
+tcRnImports hpt import_decls
   = do  { (rn_imports, rdr_env, imports, hpc_info) <- rnImports import_decls ;
 
         ; this_mod <- getModule
@@ -322,7 +324,7 @@ tcRnImports hsc_env import_decls
               ; want_instances :: ModuleName -> Bool
               ; want_instances mod = mod `elemUFM` dep_mods
                                    && mod /= moduleName this_mod
-              ; (home_insts, home_fam_insts) = hptInstances hsc_env
+              ; (home_insts, home_fam_insts) = hptInstances hpt
                                                             want_instances
               } ;
 
@@ -1794,7 +1796,9 @@ runTcInteractive hsc_env thing_inside
                             imp_orphs = orphs
                         }
        ; (gbl_env, lcl_env) <- getEnvs
-       ; let gbl_env' = gbl_env {
+       ; hpt <- readMutVar (hsc_HPT hsc_env)
+       ; let (home_insts, home_fam_insts) = hptInstances hpt (\_ -> True)
+             gbl_env' = gbl_env {
                            tcg_rdr_env      = ic_rn_gbl_env icxt
                          , tcg_type_env     = type_env
                          , tcg_inst_env     = extendInstEnvList
@@ -1817,8 +1821,6 @@ runTcInteractive hsc_env thing_inside
        ; lcl_env' <- tcExtendLocalTypeEnv lcl_env lcl_ids
        ; setEnvs (gbl_env', lcl_env') thing_inside }
   where
-    (home_insts, home_fam_insts) = hptInstances hsc_env (\_ -> True)
-
     icxt                     = hsc_IC hsc_env
     (ic_insts, ic_finsts)    = ic_instances icxt
     (lcl_ids, top_ty_things) = partitionWith is_closed (ic_tythings icxt)
@@ -2229,8 +2231,9 @@ tcRnImportDecls :: HscEnv
 -- decls.  In contract tcRnImports *extends* the TcGblEnv.
 tcRnImportDecls hsc_env import_decls
  =  runTcInteractive hsc_env $
-    do { gbl_env <- updGblEnv zap_rdr_env $
-                    tcRnImports hsc_env import_decls
+    do { hpt <- readMutVar (hsc_HPT hsc_env)
+       ; gbl_env <- updGblEnv zap_rdr_env $
+                    tcRnImports hpt import_decls
        ; return (tcg_rdr_env gbl_env) }
   where
     zap_rdr_env gbl_env = gbl_env { tcg_rdr_env = emptyGlobalRdrEnv }

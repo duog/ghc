@@ -975,8 +975,7 @@ loadModule tcm = do
    mod_info <- liftIO $ compileOne' (Just tcg) Nothing
                                     hsc_env ms 1 1 Nothing mb_linkable
                                     source_modified
-
-   modifySession $ \e -> e{ hsc_HPT = addToHpt (hsc_HPT e) mod mod_info }
+   liftIO $ modifyIORef' (hsc_HPT hsc_env) $ \hpt -> addToHpt hpt mod mod_info
    return tcm
 
 
@@ -1081,8 +1080,9 @@ getModuleGraph = liftM hsc_mod_graph getSession
 
 -- | Return @True@ <==> module is loaded.
 isLoaded :: GhcMonad m => ModuleName -> m Bool
-isLoaded m = withSession $ \hsc_env ->
-  return $! isJust (lookupHpt (hsc_HPT hsc_env) m)
+isLoaded m = withSession $ \hsc_env -> do
+  hpt <- liftIO $ hscHPT hsc_env
+  return $! isJust (lookupHpt hpt m)
 
 -- | Return the bindings for the current interactive session.
 getBindings :: GhcMonad m => m [TyThing]
@@ -1149,8 +1149,9 @@ getPackageModuleInfo hsc_env mdl
                 }))
 
 getHomeModuleInfo :: HscEnv -> Module -> IO (Maybe ModuleInfo)
-getHomeModuleInfo hsc_env mdl =
-  case lookupHpt (hsc_HPT hsc_env) (moduleName mdl) of
+getHomeModuleInfo hsc_env mdl = do
+  hpt <- hscHPT hsc_env
+  case lookupHpt hpt (moduleName mdl) of
     Nothing  -> return Nothing
     Just hmi -> do
       let details = hm_details hmi
@@ -1200,9 +1201,10 @@ modInfoLookupName minf name = withSession $ \hsc_env -> do
    case lookupTypeEnv (minf_type_env minf) name of
      Just tyThing -> return (Just tyThing)
      Nothing      -> do
-       eps <- liftIO $ readIORef (hsc_EPS hsc_env)
+       eps <- liftIO $ hscEPS hsc_env
+       hpt <- liftIO $ hscHPT hsc_env
        return $! lookupType (hsc_dflags hsc_env)
-                            (hsc_HPT hsc_env) (eps_PTE eps) name
+                            hpt (eps_PTE eps) name
 
 modInfoIface :: ModuleInfo -> Maybe ModIface
 modInfoIface = minf_iface
@@ -1460,8 +1462,9 @@ lookupModule mod_name Nothing = withSession $ \hsc_env -> do
         err       -> throwOneError $ noModError (hsc_dflags hsc_env) noSrcSpan mod_name err
 
 lookupLoadedHomeModule :: GhcMonad m => ModuleName -> m (Maybe Module)
-lookupLoadedHomeModule mod_name = withSession $ \hsc_env ->
-  case lookupHpt (hsc_HPT hsc_env) mod_name of
+lookupLoadedHomeModule mod_name = withSession $ \hsc_env -> do
+  hpt <- liftIO $ hscHPT hsc_env
+  case lookupHpt hpt mod_name of
     Just mod_info      -> return (Just (mi_module (hm_iface mod_info)))
     _not_a_home_module -> return Nothing
 
@@ -1495,8 +1498,9 @@ getGHCiMonad :: GhcMonad m => m Name
 getGHCiMonad = fmap (ic_monad . hsc_IC) getSession
 
 getHistorySpan :: GhcMonad m => History -> m SrcSpan
-getHistorySpan h = withSession $ \hsc_env ->
-    return $ InteractiveEval.getHistorySpan hsc_env h
+getHistorySpan h = withSession $ \hsc_env -> do
+    hpt <- liftIO $ hscHPT hsc_env
+    return $ InteractiveEval.getHistorySpan hpt h
 
 obtainTermFromVal :: GhcMonad m => Int ->  Bool -> Type -> a -> m Term
 obtainTermFromVal bound force ty a = withSession $ \hsc_env ->

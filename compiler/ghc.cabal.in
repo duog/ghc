@@ -164,6 +164,7 @@ Library
         vectorise
 
     Exposed-Modules:
+        MakeQueue
         FileCleanup
         DriverBkp
         BkpSyn

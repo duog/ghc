@@ -18,3 +18,4 @@ bkpfail06.bkp:10:9: error:
       Hsig file:  data T = T GHC.Types.Int
       The constructors do not match: The types for ‘T’ differ
     • while checking that qimpl:H implements signature H in p[H=qimpl:H]
+    [2 of 2] Compiling A                ( p/A.hs, bkpfail06.out/p/p-IueY0RdHDM2I4k0mLZuqM0/A.o )

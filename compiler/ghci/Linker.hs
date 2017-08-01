@@ -202,8 +202,8 @@ linkDependencies :: HscEnv -> PersistentLinkerState
                  -> IO (PersistentLinkerState, SuccessFlag)
 linkDependencies hsc_env pls span needed_mods = do
 --   initDynLinker (hsc_dflags hsc_env)
-   let hpt = hsc_HPT hsc_env
-       dflags = hsc_dflags hsc_env
+   hpt <- hscHPT hsc_env
+   let dflags = hsc_dflags hsc_env
    -- The interpreter and dynamic linker can only handle object code built
    -- the "normal" way, i.e. no non-std ways like profiling or ticky-ticky.
    -- So here we check the build tag: if we're building a non-standard way

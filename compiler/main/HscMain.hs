@@ -178,6 +178,7 @@ import Data.Set (Set)
 newHscEnv :: DynFlags -> IO HscEnv
 newHscEnv dflags = do
     eps_var <- newIORef initExternalPackageState
+    hpt_var <- newIORef emptyHomePackageTable
     us      <- mkSplitUniqSupply 'r'
     nc_var  <- newIORef (initNameCache us knownKeyNames)
     fc_var  <- newIORef emptyInstalledModuleEnv
@@ -186,12 +187,17 @@ newHscEnv dflags = do
                   ,  hsc_targets      = []
                   ,  hsc_mod_graph    = emptyMG
                   ,  hsc_IC           = emptyInteractiveContext dflags
-                  ,  hsc_HPT          = emptyHomePackageTable
+                  ,  hsc_HPT          = hpt_var
                   ,  hsc_EPS          = eps_var
                   ,  hsc_NC           = nc_var
                   ,  hsc_FC           = fc_var
                   ,  hsc_type_env_var = Nothing
                   , hsc_iserv        = iserv_mvar
+                  , hsc_yield = HscYield
+                    { yieldParsedSource = yieldParsedSource'
+                    , yieldTypecheckedInterface = yieldTypecheckedInterface'
+                    , yieldSimplifiedInterface = yieldSimplifiedInterface'
+                    , awaitDependencyInterfaces = \_ _ -> return ()}
                   }
 
 -- -----------------------------------------------------------------------------
@@ -421,6 +427,7 @@ hscTypecheck keep_rn mod_summary mb_rdr_module = do
          do hpm <- case mb_rdr_module of
                     Just hpm -> return hpm
                     Nothing -> hscParse' mod_summary
+            hscYieldParsedSource mod_summary hpm
             tc_result0 <- tcRnModule' hsc_env mod_summary keep_rn hpm
             if hsc_src == HsigFile
                 then do (iface, _, _) <- liftIO $ hscSimpleIface hsc_env tc_result0 Nothing
@@ -449,6 +456,7 @@ tcRnModule' hsc_env sum save_rn_syntax mod = do
 
         -- module (could be) safe, throw warning if needed
         else do
+            hscAwaitDependencyInterfaces sum
             tcg_res' <- hscCheckSafeImports tcg_res
             safe <- liftIO $ fst <$> readIORef (tcg_safeInfer tcg_res')
             when safe $ do
@@ -539,6 +547,46 @@ This is the only thing that isn't caught by the type-system.
 
 type Messager = HscEnv -> (Int,Int) -> RecompileRequired -> ModSummary -> IO ()
 
+yieldParsedSource' :: HscEnv -> ModSummary -> HsParsedModule -> IO ()
+yieldParsedSource' _ _ _ = return ()
+
+yieldTypecheckedInterface' :: HscEnv
+                              -> ModSummary
+                              -> ModIface
+                              -> Maybe ModDetails
+                              -> IO (HomeModInfo)
+yieldTypecheckedInterface' hsc_env mod_sum iface mb_details =
+  case mb_details of
+    Nothing -> -- Knot tying!  See Note [Knot-tying typecheckIface]
+      liftIO . fixIO $ \hmi' -> do
+        atomicModifyIORef (hsc_HPT hsc_env) $ \hpt ->
+          (addToHpt hpt (ms_mod_name mod_sum) hmi', ())
+        -- NB: This result is actually not that useful
+        -- in one-shot mode, since we're not going to do
+        -- any further typechecking.  It's much more useful
+        -- in make mode, since this HMI will go into the HPT.
+        details <- genModDetails hsc_env iface
+        return HomeModInfo
+          {hm_details = details
+          , hm_iface = iface
+          , hm_linkable = Nothing}
+    Just details -> do
+      let hmi = HomeModInfo
+            {hm_details = details
+            , hm_iface = iface
+            , hm_linkable = Nothing}
+      atomicModifyIORef' (hsc_HPT hsc_env) $ \hpt ->
+        (addToHpt hpt (ms_mod_name mod_sum) hmi, ())
+      return hmi
+
+
+yieldSimplifiedInterface' :: HscEnv
+                             -> ModSummary
+                             -> ModIface
+                             -> Maybe ModDetails
+                             -> IO (HomeModInfo)
+yieldSimplifiedInterface' = yieldTypecheckedInterface'
+
 -- | This function runs GHC's frontend with recompilation
 -- avoidance. Specifically, it checks if recompilation is needed,
 -- and if it is, it parses and typechecks the input module.
@@ -584,7 +632,7 @@ hscIncrementalFrontend
             (recomp_reqd, mb_checked_iface)
                 <- {-# SCC "checkOldIface" #-}
                    liftIO $ checkOldIface hsc_env mod_summary
-                                source_modified mb_old_iface
+                                source_modified mb_old_iface ((awaitDependencyInterfaces . hsc_yield $ hsc_env) hsc_env mod_summary)
             -- save the interface that comes back from checkOldIface.
             -- In one-shot mode we don't have the old iface until this
             -- point, when checkOldIface reads it from the disk.
@@ -665,22 +713,7 @@ hscIncrementalCompile always_do_basic_recompilation_check m_tc_result
         -- We didn't need to do any typechecking; the old interface
         -- file on disk was good enough.
         Left iface -> do
-            -- Knot tying!  See Note [Knot-tying typecheckIface]
-            hmi <- liftIO . fixIO $ \hmi' -> do
-                let hsc_env' =
-                        hsc_env {
-                            hsc_HPT = addToHpt (hsc_HPT hsc_env)
-                                        (ms_mod_name mod_summary) hmi'
-                        }
-                -- NB: This result is actually not that useful
-                -- in one-shot mode, since we're not going to do
-                -- any further typechecking.  It's much more useful
-                -- in make mode, since this HMI will go into the HPT.
-                details <- genModDetails hsc_env' iface
-                return HomeModInfo{
-                    hm_details = details,
-                    hm_iface = iface,
-                    hm_linkable = Nothing }
+            hmi <- hscYieldSimplifiedInterface mod_summary iface Nothing
             return (HscUpToDate, hmi)
         -- We finished type checking.  (mb_old_hash is the hash of
         -- the interface that existed on disk; it's possible we had
@@ -714,8 +747,9 @@ finish hsc_env summary tc_result mb_old_hash = do
                 _ -> panic "finish"
         (iface, changed, details) <- liftIO $
           hscSimpleIface hsc_env tc_result mb_old_hash
-        return (iface, changed, details, hsc_status)
-  (iface, changed, details, hsc_status) <-
+        hmi <- hscYieldSimplifiedInterface summary iface (Just details)
+        return (hmi, changed, hsc_status)
+  (hmi, changed, hsc_status) <-
     -- we usually desugar even when we are not generating code, otherwise
     -- we would miss errors thrown by the desugaring (see #10600). The only
     -- exceptions are when the Module is Ghc.Prim or when
@@ -728,16 +762,16 @@ finish hsc_env summary tc_result mb_old_hash = do
           -- and generate a simple interface.
           then mk_simple_iface
           else do
+            -- (simple_iface, _, simple_details) <- liftIO $ hscSimpleIface hsc_env tc_result mb_old_hash
+            -- _ <- hscYieldTypecheckedInterface summary simple_iface (Just simple_details)
             desugared_guts <- hscSimplify' desugared_guts0
             (iface, changed, details, cgguts) <-
               liftIO $ hscNormalIface hsc_env desugared_guts mb_old_hash
-            return (iface, changed, details, HscRecomp cgguts summary)
+            hmi <- hscYieldSimplifiedInterface summary iface (Just details)
+            return (hmi, changed, HscRecomp cgguts summary)
       else mk_simple_iface
-  liftIO $ hscMaybeWriteIface dflags iface changed summary
-  return
-    ( hsc_status
-    , HomeModInfo
-      {hm_details = details, hm_iface = iface, hm_linkable = Nothing})
+  liftIO $ hscMaybeWriteIface dflags (hm_iface hmi) changed summary
+  return (hsc_status, hmi)
 
 hscMaybeWriteIface :: DynFlags -> ModIface -> Bool -> ModSummary -> IO ()
 hscMaybeWriteIface dflags iface changed summary =
@@ -1068,9 +1102,9 @@ hscCheckSafe' dflags m l = do
     lookup' m = do
         hsc_env <- getHscEnv
         hsc_eps <- liftIO $ hscEPS hsc_env
+        hsc_hpt <- liftIO $ hscHPT hsc_env
         let pkgIfaceT = eps_PIT hsc_eps
-            homePkgT  = hsc_HPT hsc_env
-            iface     = lookupIfaceByModule dflags homePkgT pkgIfaceT m
+            iface     = lookupIfaceByModule dflags hsc_hpt pkgIfaceT m
         -- the 'lookupIfaceByModule' method will always fail when calling from GHCi
         -- as the compiler hasn't filled in the various module tables
         -- so we need to call 'getModuleInterface' to load from disk

@@ -69,8 +69,10 @@ mkUsageInfo :: HscEnv -> Module -> ImportedMods -> NameSet -> [FilePath] -> [(Mo
 mkUsageInfo hsc_env this_mod dir_imp_mods used_names dependent_files merged
   = do
     eps <- hscEPS hsc_env
+    hpt <- hscHPT hsc_env
     hashes <- mapM getFileHash dependent_files
-    let mod_usages = mk_mod_usage_info (eps_PIT eps) hsc_env this_mod
+    let dflags = hsc_dflags hsc_env
+        mod_usages = mk_mod_usage_info (eps_PIT eps) dflags hpt this_mod
                                        dir_imp_mods used_names
         usages = mod_usages ++ [ UsageFile { usg_file_path = f
                                            , usg_file_hash = hash }
@@ -86,16 +88,15 @@ mkUsageInfo hsc_env this_mod dir_imp_mods used_names dependent_files merged
     -- the entire collection of Ifaces.
 
 mk_mod_usage_info :: PackageIfaceTable
-              -> HscEnv
+              -> DynFlags
+              -> HomePackageTable
               -> Module
               -> ImportedMods
               -> NameSet
               -> [Usage]
-mk_mod_usage_info pit hsc_env this_mod direct_imports used_names
+mk_mod_usage_info pit dflags hpt this_mod direct_imports used_names
   = mapMaybe mkUsage usage_mods
   where
-    hpt = hsc_HPT hsc_env
-    dflags = hsc_dflags hsc_env
     this_pkg = thisPackage dflags
 
     used_mods    = moduleEnvKeys ent_map

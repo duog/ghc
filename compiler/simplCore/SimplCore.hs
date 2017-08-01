@@ -82,6 +82,10 @@ core2core hsc_env guts@(ModGuts { mg_module  = mod
        ; let builtin_passes = getCoreToDo dflags
              orph_mods = mkModuleSet (mod : dep_orphs deps)
        ;
+       ; hpt <- hscHPT hsc_env
+       ; let home_pkg_rules = hptRules dflags hpt (dep_mods deps)
+             hpt_rule_base  = mkRuleBase home_pkg_rules
+       ;
        ; (guts2, stats) <- runCoreM hsc_env hpt_rule_base us mod
                                     orph_mods print_unqual loc $
                            do { all_passes <- addPluginPasses builtin_passes
@@ -94,8 +98,6 @@ core2core hsc_env guts@(ModGuts { mg_module  = mod
        ; return guts2 }
   where
     dflags         = hsc_dflags hsc_env
-    home_pkg_rules = hptRules hsc_env (dep_mods deps)
-    hpt_rule_base  = mkRuleBase home_pkg_rules
     print_unqual   = mkPrintUnqualified dflags rdr_env
     -- mod: get the module out of the current HscEnv so we can retrieve it from the monad.
     -- This is very convienent for the users of the monad (e.g. plugins do not have to

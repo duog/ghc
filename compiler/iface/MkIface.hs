@@ -373,12 +373,12 @@ mkHashFun hsc_env eps name
   = lookup orig_mod
   where
       dflags = hsc_dflags hsc_env
-      hpt = hsc_HPT hsc_env
       pit = eps_PIT eps
       occ = nameOccName name
       orig_mod = nameModule name
       lookup mod = do
         MASSERT2( isExternalName name, ppr name )
+        hpt <- hscHPT hsc_env
         iface <- case lookupIfaceByModule dflags hpt pit mod of
                   Just iface -> return iface
                   Nothing -> do
@@ -747,8 +747,8 @@ addFingerprints hsc_env mb_old_fingerprint iface0 new_decls
 getOrphanHashes :: HscEnv -> [Module] -> IO [Fingerprint]
 getOrphanHashes hsc_env mods = do
   eps <- hscEPS hsc_env
+  hpt <- hscHPT hsc_env
   let
-    hpt        = hsc_HPT hsc_env
     pit        = eps_PIT eps
     dflags     = hsc_dflags hsc_env
     get_orph_hash mod =
@@ -1099,25 +1099,27 @@ checkOldIface
   -> ModSummary
   -> SourceModified
   -> Maybe ModIface         -- Old interface from compilation manager, if any
+  -> IO ()
   -> IO (RecompileRequired, Maybe ModIface)
 
-checkOldIface hsc_env mod_summary source_modified maybe_iface
+checkOldIface hsc_env mod_summary source_modified maybe_iface await_deps
   = do  let dflags = hsc_dflags hsc_env
         showPass dflags $
             "Checking old interface for " ++
               (showPpr dflags $ ms_mod mod_summary) ++
               " (use -ddump-hi-diffs for more details)"
         initIfaceCheck (text "checkOldIface") hsc_env $
-            check_old_iface hsc_env mod_summary source_modified maybe_iface
+            check_old_iface hsc_env mod_summary source_modified maybe_iface await_deps
 
 check_old_iface
   :: HscEnv
   -> ModSummary
   -> SourceModified
   -> Maybe ModIface
+  -> IO ()
   -> IfG (RecompileRequired, Maybe ModIface)
 
-check_old_iface hsc_env mod_summary src_modified maybe_iface
+check_old_iface hsc_env mod_summary src_modified maybe_iface await_deps
   = let dflags = hsc_dflags hsc_env
         getIface =
             case maybe_iface of
@@ -1170,7 +1172,9 @@ check_old_iface hsc_env mod_summary src_modified maybe_iface
                     -- even in the SourceUnmodifiedAndStable case we
                     -- should check versions because some packages
                     -- might have changed or gone away.
-                    Just iface -> checkVersions hsc_env mod_summary iface
+                    Just iface -> do
+                      liftIO await_deps
+                      checkVersions hsc_env mod_summary iface
 
 -- | Check if a module is still the same 'version'.
 --
