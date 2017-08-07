@@ -176,12 +176,13 @@ mkDsEnvsFromTcGbl :: MonadIO m
                   -> m (DsGblEnv, DsLclEnv)
 mkDsEnvsFromTcGbl hsc_env msg_var tcg_env
   = do { pm_iter_var <- liftIO $ newIORef 0
+       ; hpt <- liftIO $ hscHPT hsc_env
        ; let dflags   = hsc_dflags hsc_env
              this_mod = tcg_mod tcg_env
              type_env = tcg_type_env tcg_env
              rdr_env  = tcg_rdr_env tcg_env
              fam_inst_env = tcg_fam_inst_env tcg_env
-             complete_matches = hptCompleteSigs hsc_env
+             complete_matches = hptCompleteSigs hpt
                                 ++ tcg_complete_matches tcg_env
        ; return $ mkDsEnvs dflags this_mod rdr_env type_env fam_inst_env
                            msg_var pm_iter_var complete_matches
@@ -204,13 +205,14 @@ runDs hsc_env (ds_gbl, ds_lcl) thing_inside
 initDsWithModGuts :: HscEnv -> ModGuts -> DsM a -> IO (Messages, Maybe a)
 initDsWithModGuts hsc_env guts thing_inside
   = do { pm_iter_var <- newIORef 0
+       ; hpt <- hscHPT hsc_env
        ; msg_var <- newIORef emptyMessages
        ; let dflags   = hsc_dflags hsc_env
              type_env = typeEnvFromEntities ids (mg_tcs guts) (mg_fam_insts guts)
              rdr_env  = mg_rdr_env guts
              fam_inst_env = mg_fam_inst_env guts
              this_mod = mg_module guts
-             complete_matches = hptCompleteSigs hsc_env
+             complete_matches = hptCompleteSigs hpt
                                 ++ mg_complete_sigs guts
 
              bindsToIds (NonRec v _)   = [v]

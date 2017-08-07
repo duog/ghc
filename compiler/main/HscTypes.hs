@@ -5,12 +5,12 @@
 -}
 
 {-# LANGUAGE CPP, ScopedTypeVariables #-}
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE RecordWildCards, TupleSections #-}
 
 -- | Types for the per-module compiler
 module HscTypes (
         -- * compilation state
-        HscEnv(..), hscEPS,
+        HscEnv(..), hscEPS, hscHPT,
         FinderCache, FindResult(..), InstalledFindResult(..),
         Target(..), TargetId(..), pprTarget, pprTargetId,
         HscStatus(..),
@@ -394,7 +394,7 @@ data HscEnv
         hsc_IC :: InteractiveContext,
                 -- ^ The context for evaluating interactive statements
 
-        hsc_HPT    :: HomePackageTable,
+        hsc_HPT    :: {-# UNPACK #-} !(IORef HomePackageTable),
                 -- ^ The home package table describes already-compiled
                 -- home-package modules, /excluding/ the module we
                 -- are compiling right now.
@@ -404,6 +404,7 @@ data HscEnv
                 -- However, even in GHCi mode, hi-boot interfaces are
                 -- demand-loaded into the external-package table.)
                 --
+                -- DOUG: FIXME
                 -- 'hsc_HPT' is not mutable because we only demand-load
                 -- external packages; the home package is eagerly
                 -- loaded, module by module, by the compilation manager.
@@ -490,6 +491,9 @@ data IServ = IServ
 -- | Retrieve the ExternalPackageState cache.
 hscEPS :: HscEnv -> IO ExternalPackageState
 hscEPS hsc_env = readIORef (hsc_EPS hsc_env)
+
+hscHPT :: HscEnv -> IO HomePackageTable
+hscHPT = readIORef . hsc_HPT
 
 -- | A compilation target.
 --
@@ -648,16 +652,18 @@ lookupIfaceByModule _dflags hpt pit mod
 -- We could eliminate (b) if we wanted, by making GHC.Prim belong to a package
 -- of its own, but it doesn't seem worth the bother.
 
-hptCompleteSigs :: HscEnv -> [CompleteMatch]
-hptCompleteSigs = hptAllThings  (md_complete_sigs . hm_details)
+hptCompleteSigs :: HomePackageTable -> [CompleteMatch]
+hptCompleteSigs = hptAllThings (md_complete_sigs . hm_details)
 
 -- | Find all the instance declarations (of classes and families) from
 -- the Home Package Table filtered by the provided predicate function.
 -- Used in @tcRnImports@, to select the instances that are in the
 -- transitive closure of imports from the currently compiled module.
-hptInstances :: HscEnv -> (ModuleName -> Bool) -> ([ClsInst], [FamInst])
-hptInstances hsc_env want_this_module
-  = let (insts, famInsts) = unzip $ flip hptAllThings hsc_env $ \mod_info -> do
+hptInstances :: HomePackageTable
+             -> (ModuleName -> Bool)
+             -> ([ClsInst], [FamInst])
+hptInstances hpt want_this_module
+  = let (insts, famInsts) = unzip $ flip hptAllThings hpt $ \mod_info -> do
                 guard (want_this_module (moduleName (mi_module (hm_iface mod_info))))
                 let details = hm_details mod_info
                 return (md_insts details, md_fam_insts details)
@@ -667,32 +673,45 @@ hptInstances hsc_env want_this_module
 -- contrast to instances and rules, we don't care whether the modules are
 -- "below" us in the dependency sense. The VectInfo of those modules not "below"
 -- us does not affect the compilation of the current module.
-hptVectInfo :: HscEnv -> VectInfo
+hptVectInfo ::HomePackageTable -> VectInfo
 hptVectInfo = concatVectInfo . hptAllThings ((: []) . md_vect_info . hm_details)
 
 -- | Get rules from modules "below" this one (in the dependency sense)
-hptRules :: HscEnv -> [(ModuleName, IsBootInterface)] -> [CoreRule]
-hptRules = hptSomeThingsBelowUs (md_rules . hm_details) False
+hptRules :: DynFlags
+         -> HomePackageTable
+         -> [(ModuleName, IsBootInterface)]
+         -> [CoreRule]
+hptRules dflags hpt =
+  hptSomeThingsBelowUs dflags hpt False (md_rules . hm_details)
 
 
 -- | Get annotations from modules "below" this one (in the dependency sense)
-hptAnns :: HscEnv -> Maybe [(ModuleName, IsBootInterface)] -> [Annotation]
-hptAnns hsc_env (Just deps) = hptSomeThingsBelowUs (md_anns . hm_details) False hsc_env deps
-hptAnns hsc_env Nothing = hptAllThings (md_anns . hm_details) hsc_env
+hptAnns
+  :: DynFlags
+  -> HomePackageTable
+  -> Maybe [(ModuleName, IsBootInterface)]
+  -> [Annotation]
+hptAnns dflags hpt (Just deps) =
+  hptSomeThingsBelowUs dflags hpt False (md_anns . hm_details) deps
+hptAnns _ hpt Nothing = hptAllThings (md_anns . hm_details) hpt
 
-hptAllThings :: (HomeModInfo -> [a]) -> HscEnv -> [a]
-hptAllThings extract hsc_env = concatMap extract (eltsHpt (hsc_HPT hsc_env))
+hptAllThings :: (HomeModInfo -> [a]) -> HomePackageTable -> [a]
+hptAllThings extract hpt = concatMap extract (eltsHpt hpt)
 
 -- | Get things from modules "below" this one (in the dependency sense)
 -- C.f Inst.hptInstances
-hptSomeThingsBelowUs :: (HomeModInfo -> [a]) -> Bool -> HscEnv -> [(ModuleName, IsBootInterface)] -> [a]
-hptSomeThingsBelowUs extract include_hi_boot hsc_env deps
-  | isOneShot (ghcMode (hsc_dflags hsc_env)) = []
+hptSomeThingsBelowUs
+  :: DynFlags
+  -> HomePackageTable
+  -> Bool
+  -> (HomeModInfo -> [a])
+  -> [(ModuleName, IsBootInterface)]
+  -> [a]
+hptSomeThingsBelowUs dflags hpt include_hi_boot extract deps
+  | isOneShot (ghcMode dflags) = []
 
   | otherwise
-  = let hpt = hsc_HPT hsc_env
-    in
-    [ thing
+  = [ thing
     |   -- Find each non-hi-boot module below me
       (mod, is_boot_mod) <- deps
     , include_hi_boot || not is_boot_mod
@@ -769,12 +788,15 @@ metaRequestAW h = fmap unMetaResAW . h (MetaAW MetaResAW)
 prepareAnnotations :: HscEnv -> Maybe ModGuts -> IO AnnEnv
 prepareAnnotations hsc_env mb_guts = do
     eps <- hscEPS hsc_env
-    let -- Extract annotations from the module being compiled if supplied one
+    hpt <- hscHPT hsc_env
+    let dflags = hsc_dflags hsc_env
+        -- Extract annotations from the module being compiled if supplied one
         mb_this_module_anns = fmap (mkAnnEnv . mg_anns) mb_guts
         -- Extract dependencies of the module if we are supplied one,
         -- otherwise load annotations from all home package table
         -- entries regardless of dependency ordering.
-        home_pkg_anns  = (mkAnnEnv . hptAnns hsc_env) $ fmap (dep_mods . mg_deps) mb_guts
+        home_pkg_anns  = (mkAnnEnv . hptAnns dflags hpt) $
+          fmap (dep_mods . mg_deps) mb_guts
         other_pkg_anns = eps_ann_env eps
         ann_env        = foldl1' plusAnnEnv $ catMaybes [mb_this_module_anns,
                                                          Just home_pkg_anns,
@@ -2112,11 +2134,11 @@ lookupType dflags hpt pte name
 -- if you have a 'HscEnv'
 lookupTypeHscEnv :: HscEnv -> Name -> IO (Maybe TyThing)
 lookupTypeHscEnv hsc_env name = do
-    eps <- readIORef (hsc_EPS hsc_env)
+    eps <- hscEPS hsc_env
+    hpt <- hscHPT hsc_env
     return $! lookupType dflags hpt (eps_PTE eps) name
   where
     dflags = hsc_dflags hsc_env
-    hpt = hsc_HPT hsc_env
 
 -- | Get the 'TyCon' from a 'TyThing' if it is a type constructor thing. Panics otherwise
 tyThingTyCon :: TyThing -> TyCon

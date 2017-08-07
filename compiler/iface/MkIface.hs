@@ -373,12 +373,12 @@ mkHashFun hsc_env eps name
   = lookup orig_mod
   where
       dflags = hsc_dflags hsc_env
-      hpt = hsc_HPT hsc_env
       pit = eps_PIT eps
       occ = nameOccName name
       orig_mod = nameModule name
       lookup mod = do
         MASSERT2( isExternalName name, ppr name )
+        hpt <- hscHPT hsc_env
         iface <- case lookupIfaceByModule dflags hpt pit mod of
                   Just iface -> return iface
                   Nothing -> do
@@ -747,8 +747,8 @@ addFingerprints hsc_env mb_old_fingerprint iface0 new_decls
 getOrphanHashes :: HscEnv -> [Module] -> IO [Fingerprint]
 getOrphanHashes hsc_env mods = do
   eps <- hscEPS hsc_env
+  hpt <- hscHPT hsc_env
   let
-    hpt        = hsc_HPT hsc_env
     pit        = eps_PIT eps
     dflags     = hsc_dflags hsc_env
     get_orph_hash mod =

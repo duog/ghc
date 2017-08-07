@@ -1,5 +1,5 @@
 {-# LANGUAGE BangPatterns, CPP, NondecreasingIndentation, ScopedTypeVariables #-}
-{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE NamedFieldPuns, TupleSections #-}
 {-# OPTIONS_GHC -fno-warn-warnings-deprecations #-}
 -- NB: we specifically ignore deprecations. GHC 7.6 marks the .QSem module as
 -- deprecated, although it became un-deprecated later. As a result, using 7.6
@@ -51,7 +51,7 @@ import HscMain
 import Bag              ( listToBag )
 import BasicTypes
 import Digraph
-import Exception        ( tryIO, gbracket, gfinally )
+import Exception        ( tryIO, gbracket)
 import FastString
 import Maybes           ( expectJust )
 import Name
@@ -85,7 +85,8 @@ import Control.Monad
 import Data.IORef
 import Data.List
 import qualified Data.List as List
-import Data.Foldable (toList)
+import Data.Foldable
+import Data.Traversable
 import Data.Maybe
 import Data.Ord ( comparing )
 import Data.Time
@@ -245,8 +246,8 @@ load' how_much mHscMessage mod_graph = do
     modifySession $ \hsc_env -> hsc_env { hsc_mod_graph = mod_graph }
     guessOutputFile
     hsc_env <- getSession
+    hpt_old <- liftIO $ hscHPT hsc_env
 
-    let hpt1   = hsc_HPT hsc_env
     let dflags = hsc_dflags hsc_env
 
     -- The "bad" boot modules are the ones for which we have
@@ -293,23 +294,21 @@ load' how_much mHscMessage mod_graph = do
     let
         -- check the stability property for each module.
         stable_mods@(stable_obj,stable_bco)
-            = checkStability hpt1 mg2_with_srcimps all_home_mods
+            = checkStability hpt_old mg2_with_srcimps all_home_mods
 
         -- prune bits of the HPT which are definitely redundant now,
         -- to save space.
-        pruned_hpt = pruneHomePackageTable hpt1
+        pruned_hpt = pruneHomePackageTable hpt_old
                             (flattenSCCs mg2_with_srcimps)
                             stable_mods
 
-    _ <- liftIO $ evaluate pruned_hpt
-
-    -- before we unload anything, make sure we don't leave an old
-    -- interactive context around pointing to dead bindings.  Also,
-    -- write the pruned HPT to allow the old HPT to be GC'd.
-    setSession $ discardIC $ hsc_env { hsc_HPT = pruned_hpt }
-
     liftIO $ debugTraceMsg dflags 2 (text "Stable obj:" <+> ppr stable_obj $$
                             text "Stable BCO:" <+> ppr stable_bco)
+
+    hpt_ref <- liftIO $ newIORef pruned_hpt
+    -- before we unload anything, make sure we don't leave an old
+    -- interactive context around pointing to dead bindings.
+    modifySession $ \hsc_env -> discardIC hsc_env { hsc_HPT = hpt_ref }
 
     -- Unload any modules which are going to be re-linked this time around.
     let stable_linkables = [ linkable
@@ -320,6 +319,8 @@ load' how_much mHscMessage mod_graph = do
                              -- this list only serves as a poor man's set.
                              Just hmi <- [lookupHpt pruned_hpt m],
                              Just linkable <- [hm_linkable hmi] ]
+
+    -- this hsc_env still has the original hpt and interactive context
     liftIO $ unload hsc_env stable_linkables
 
     -- We could at this point detect cycles which aren't broken by
@@ -390,13 +391,13 @@ load' how_much mHscMessage mod_graph = do
                     Just n  -> return n
     let upsweep_fn | n_jobs > 1 = parUpsweep n_jobs
                    | otherwise  = upsweep
+    liftIO $ writeIORef hpt_ref $! emptyHomePackageTable
 
-    setSession hsc_env{ hsc_HPT = emptyHomePackageTable }
     (upsweep_ok, modsUpswept)
        <- upsweep_fn mHscMessage pruned_hpt stable_mods cleanup mg
 
     -- Make modsDone be the summaries for each home module now
-    -- available; this should equal the domain of hpt3.
+    -- available; this should equal the domain of hpt.
     -- Get in in a roughly top .. bottom order (hence reverse).
 
     let modsDone = reverse modsUpswept
@@ -409,9 +410,9 @@ load' how_much mHscMessage mod_graph = do
      then
        -- Easy; just relink it all.
        do liftIO $ debugTraceMsg dflags 2 (text "Upsweep completely successful.")
+          hpt <- liftIO $ readIORef hpt_ref
 
           -- Clean up after ourselves
-          hsc_env1 <- getSession
           liftIO $ cleanCurrentModuleTempFiles dflags
 
           -- Issue a warning for the confusing case where the user
@@ -428,7 +429,7 @@ load' how_much mHscMessage mod_graph = do
             do_linking = a_root_is_Main || no_hs_main || ghcLink dflags == LinkDynLib || ghcLink dflags == LinkStaticLib
 
           -- link everything together
-          linkresult <- liftIO $ link (ghcLink dflags) dflags do_linking (hsc_HPT hsc_env1)
+          linkresult <- liftIO $ link (ghcLink dflags) dflags do_linking hpt
 
           if ghcLink dflags == LinkBinary && isJust ofile && not do_linking
              then do
@@ -455,40 +456,40 @@ load' how_much mHscMessage mod_graph = do
                       mg2_with_srcimps
           let (mods_to_clean, mods_to_keep) =
                 partition ((`Set.member` mods_to_zap_names).ms_mod) modsDone
-          hsc_env1 <- getSession
-          let hpt4 = hsc_HPT hsc_env1
+          hpt <- liftIO $ readIORef hpt_ref
+
               -- We must change the lifetime to TFL_CurrentModule for any temp
               -- file created for an element of mod_to_clean during the upsweep.
               -- These include preprocessed files and object files for loaded
               -- modules.
-              unneeded_temps = concat
+          let unneeded_temps = concat
                 [ms_hspp_file : object_files
                 | ModSummary{ms_mod, ms_hspp_file} <- mods_to_clean
                 , let object_files = maybe [] linkableObjs $
-                        lookupHpt hpt4 (moduleName ms_mod)
+                        lookupHpt hpt (moduleName ms_mod)
                         >>= hm_linkable
                 ]
+          -- Clean up after ourselves
           liftIO $
             changeTempFilesLifetime dflags TFL_CurrentModule unneeded_temps
           liftIO $ cleanCurrentModuleTempFiles dflags
 
-          let hpt5 = retainInTopLevelEnvs (map ms_mod_name mods_to_keep)
-                                          hpt4
+          let hpt2 = retainInTopLevelEnvs (map ms_mod_name mods_to_keep)
+                                          hpt
 
-          -- Clean up after ourselves
+          liftIO $ writeIORef hpt_ref $! hpt2
 
           -- there should be no Nothings where linkables should be, now
           let just_linkables =
                     isNoLink (ghcLink dflags)
                  || allHpt (isJust.hm_linkable)
                         (filterHpt ((== HsSrcFile).mi_hsc_src.hm_iface)
-                                hpt5)
+                                hpt2)
           ASSERT( just_linkables ) do
 
           -- Link everything together
-          linkresult <- liftIO $ link (ghcLink dflags) dflags False hpt5
+          linkresult <- liftIO $ link (ghcLink dflags) dflags False hpt2
 
-          modifySession $ \hsc_env -> hsc_env{ hsc_HPT = hpt5 }
           loadFinish Failed linkresult
 
 
@@ -499,7 +500,7 @@ loadFinish :: GhcMonad m => SuccessFlag -> SuccessFlag -> m SuccessFlag
 loadFinish _all_ok Failed
   = do hsc_env <- getSession
        liftIO $ unload hsc_env []
-       modifySession discardProg
+       liftIO (discardProg hsc_env) >>= setSession
        return Failed
 
 -- Empty the interactive context and set the module context to the topmost
@@ -510,10 +511,14 @@ loadFinish all_ok Succeeded
 
 
 -- | Forget the current program, but retain the persistent info in HscEnv
-discardProg :: HscEnv -> HscEnv
+discardProg :: HscEnv -> IO HscEnv
 discardProg hsc_env
-  = discardIC $ hsc_env { hsc_mod_graph = emptyMG
-                        , hsc_HPT = emptyHomePackageTable }
+  = do
+  new_hpt <- newIORef emptyHomePackageTable
+  return $ discardIC $ hsc_env
+    { hsc_mod_graph = emptyMG
+    , hsc_HPT = new_hpt
+    }
 
 -- | Discard the contents of the InteractiveContext, but keep the DynFlags.
 -- It will also keep ic_int_print and ic_monad if their names are from
@@ -840,17 +845,11 @@ parUpsweep
     -> m (SuccessFlag,
           [ModSummary])
 parUpsweep n_jobs mHscMessage old_hpt stable_mods cleanup sccs = do
-    hsc_env <- getSession
-    let dflags = hsc_dflags hsc_env
+    hsc_env0 <- getSession
+    let dflags = hsc_dflags hsc_env0
 
     when (not (null (unitIdsToCheck dflags))) $
       throwGhcException (ProgramError "Backpack typechecking not supported with -j")
-
-    -- The bits of shared state we'll be using:
-
-    -- The global HscEnv is updated with the module's HMI when a module
-    -- successfully compiles.
-    hsc_env_var <- liftIO $ newMVar hsc_env
 
     -- The old HPT is used for recompilation checking in upsweep_mod. When a
     -- module successfully gets compiled, its HMI is pruned from the old HPT.
@@ -873,13 +872,6 @@ parUpsweep n_jobs mHscMessage old_hpt stable_mods cleanup sccs = do
     let resetNumCapabilities orig_n = liftIO $ setNumCapabilities orig_n
 
     gbracket updNumCapabilities resetNumCapabilities $ \_ -> do
-
-    -- Sync the global session with the latest HscEnv once the upsweep ends.
-    let finallySyncSession io = io `gfinally` do
-            hsc_env <- liftIO $ readMVar hsc_env_var
-            setSession hsc_env
-
-    finallySyncSession $ do
 
     -- Build the compilation graph out of the list of SCCs. Module cycles are
     -- handled at the very end, after some useful work gets done. Note that
@@ -936,13 +928,13 @@ parUpsweep n_jobs mHscMessage old_hpt stable_mods cleanup sccs = do
                 lcl_files_to_clean <- newIORef emptyFilesToClean
                 let lcl_dflags = dflags { log_action = parLogAction log_queue
                                         , filesToClean = lcl_files_to_clean }
-
+                    lcl_hsc_env = hsc_env0 { hsc_dflags = lcl_dflags }
                 -- Unmask asynchronous exceptions and perform the thread-local
                 -- work to compile the module (see parUpsweep_one).
                 m_res <- try $ unmask $ prettyPrintGhcErrors lcl_dflags $
-                        parUpsweep_one mod home_mod_map comp_graph_loops
-                                       lcl_dflags mHscMessage cleanup
-                                       par_sem hsc_env_var old_hpt_var
+                        parUpsweep_one lcl_hsc_env mod home_mod_map
+                                       comp_graph_loops mHscMessage cleanup
+                                       par_sem old_hpt_var
                                        stable_mods mod_idx (length sccs)
 
                 res <- case m_res of
@@ -1035,22 +1027,18 @@ parUpsweep n_jobs mHscMessage old_hpt stable_mods cleanup sccs = do
 
 -- The interruptible subset of the worker threads' work.
 parUpsweep_one
-    :: ModSummary
-    -- ^ The module we wish to compile
+    :: HscEnv
+    -> ModSummary
     -> Map BuildModule (MVar SuccessFlag, Int)
     -- ^ The map of home modules and their result MVar
     -> [[BuildModule]]
     -- ^ The list of all module loops within the compilation graph.
-    -> DynFlags
-    -- ^ The thread-local DynFlags
     -> Maybe Messager
     -- ^ The messager
     -> (HscEnv -> IO ())
     -- ^ The callback for cleaning up intermediate files
     -> QSem
     -- ^ The semaphore for limiting the number of simultaneous compiles
-    -> MVar HscEnv
-    -- ^ The MVar that synchronizes updates to the global HscEnv
     -> IORef HomePackageTable
     -- ^ The old HPT
     -> StableModules
@@ -1061,11 +1049,11 @@ parUpsweep_one
     -- ^ The total number of modules
     -> IO SuccessFlag
     -- ^ The result of this compile
-parUpsweep_one mod home_mod_map comp_graph_loops lcl_dflags mHscMessage cleanup par_sem
-               hsc_env_var old_hpt_var stable_mods mod_index num_mods = do
+parUpsweep_one lcl_hsc_env mod home_mod_map comp_graph_loops mHscMessage cleanup
+  par_sem old_hpt_var stable_mods mod_index num_mods = do
+    old_hpt <- readIORef old_hpt_var
 
     let this_build_mod = mkBuildModule mod
-
     let home_imps     = map unLoc $ ms_home_imps mod
     let home_src_imps = map unLoc $ ms_home_srcimps mod
 
@@ -1148,10 +1136,6 @@ parUpsweep_one mod home_mod_map comp_graph_loops lcl_dflags mHscMessage cleanup 
     if not deps_ok
       then return Failed
       else do
-        -- Any hsc_env at this point is OK to use since we only really require
-        -- that the HPT contains the HMIs of our dependencies.
-        hsc_env <- readMVar hsc_env_var
-        old_hpt <- readIORef old_hpt_var
 
         let logger err = printBagOfErrors lcl_dflags (srcErrorMessages err)
 
@@ -1162,7 +1146,6 @@ parUpsweep_one mod home_mod_map comp_graph_loops lcl_dflags mHscMessage cleanup 
                 -- Have the ModSummary and HscEnv point to our local log_action
                 -- and filesToClean var.
                 let lcl_mod = localize_mod mod
-                let lcl_hsc_env = localize_hsc_env hsc_env
 
                 -- Re-typecheck the loop
                 -- This is necessary to make sure the knot is tied when
@@ -1170,25 +1153,23 @@ parUpsweep_one mod home_mod_map comp_graph_loops lcl_dflags mHscMessage cleanup 
                 type_env_var <- liftIO $ newIORef emptyNameEnv
                 let lcl_hsc_env' = lcl_hsc_env { hsc_type_env_var =
                                     Just (ms_mod lcl_mod, type_env_var) }
-                lcl_hsc_env'' <- case finish_loop of
-                    Nothing   -> return lcl_hsc_env'
-                    -- In the non-parallel case, the retypecheck prior to
-                    -- typechecking the loop closer includes all modules
-                    -- EXCEPT the loop closer.  However, our precomputed
-                    -- SCCs include the loop closer, so we have to filter
-                    -- it out.
-                    Just loop -> typecheckLoop lcl_dflags lcl_hsc_env' $
-                                 filter (/= moduleName (fst this_build_mod)) $
-                                 map (moduleName . fst) loop
+                -- In the non-parallel case, the retypecheck prior to
+                -- typechecking the loop closer includes all modules
+                -- EXCEPT the loop closer.  However, our precomputed
+                -- SCCs include the loop closer, so we have to filter
+                -- it out.
+                for_ finish_loop $ typecheckLoop lcl_dflags lcl_hsc_env' .
+                                 filter (/= moduleName (fst this_build_mod)) .
+                                 map (moduleName . fst)
 
                 -- Compile the module.
-                mod_info <- upsweep_mod lcl_hsc_env'' mHscMessage old_hpt stable_mods
-                                        lcl_mod mod_index num_mods
+                mod_info <- upsweep_mod lcl_hsc_env' mHscMessage old_hpt
+                                        stable_mods lcl_mod mod_index num_mods
                 return (Just mod_info)
 
         case mb_mod_info of
             Nothing -> return Failed
-            Just mod_info -> do
+            Just _ -> do
                 let this_mod = ms_mod_name mod
 
                 -- Prune the old HPT unless this is an hs-boot module.
@@ -1196,35 +1177,23 @@ parUpsweep_one mod home_mod_map comp_graph_loops lcl_dflags mHscMessage cleanup 
                     atomicModifyIORef' old_hpt_var $ \old_hpt ->
                         (delFromHpt old_hpt this_mod, ())
 
-                -- Update and fetch the global HscEnv.
-                lcl_hsc_env' <- modifyMVar hsc_env_var $ \hsc_env -> do
-                    let hsc_env' = hsc_env
-                                     { hsc_HPT = addToHpt (hsc_HPT hsc_env)
-                                                           this_mod mod_info }
-                    -- We've finished typechecking the module, now we must
-                    -- retypecheck the loop AGAIN to ensure unfoldings are
-                    -- updated.  This time, however, we include the loop
-                    -- closer!
-                    hsc_env'' <- case finish_loop of
-                        Nothing   -> return hsc_env'
-                        Just loop -> typecheckLoop lcl_dflags hsc_env' $
-                                     map (moduleName . fst) loop
-                    return (hsc_env'', localize_hsc_env hsc_env'')
+                -- We've finished typechecking the module, now we must
+                -- retypecheck the loop AGAIN to ensure unfoldings are
+                -- updated.  This time, however, we include the loop
+                -- closer!
+                for_ finish_loop $
+                  typecheckLoop lcl_dflags lcl_hsc_env . map (moduleName . fst)
 
                 -- Clean up any intermediate files.
-                cleanup lcl_hsc_env'
+                cleanup lcl_hsc_env
                 return Succeeded
-
   where
+    lcl_dflags = hsc_dflags lcl_hsc_env
     localize_mod mod
         = mod { ms_hspp_opts = (ms_hspp_opts mod)
                  { log_action = log_action lcl_dflags
                  , filesToClean = filesToClean lcl_dflags } }
 
-    localize_hsc_env hsc_env
-        = hsc_env { hsc_dflags = (hsc_dflags hsc_env)
-                     { log_action = log_action lcl_dflags
-                     , filesToClean = filesToClean lcl_dflags } }
 
 -- -----------------------------------------------------------------------------
 --
@@ -1314,14 +1283,13 @@ upsweep mHscMessage old_hpt stable_mods cleanup sccs = do
         -- and reinitalize the knot-tying process, anything that was forced
         -- while we were previously typechecking won't get updated, this
         -- was bug #12035.
-        hsc_env2 <- liftIO $ reTypecheckLoop hsc_env1 mod done
-        setSession hsc_env2
+        liftIO $ reTypecheckLoop hsc_env1 mod done
 
         mb_mod_info
             <- handleSourceError
                    (\err -> do logger mod (Just err); return Nothing) $ do
-                 mod_info <- liftIO $ upsweep_mod hsc_env2 mHscMessage old_hpt stable_mods
-                                                  mod mod_index nmods
+                 mod_info <- liftIO $ upsweep_mod hsc_env1 mHscMessage old_hpt
+                                      stable_mods mod mod_index nmods
                  logger mod Nothing -- log warnings
                  return (Just mod_info)
 
@@ -1330,9 +1298,8 @@ upsweep mHscMessage old_hpt stable_mods cleanup sccs = do
           Just mod_info -> do
                 let this_mod = ms_mod_name mod
 
-                        -- Add new info to hsc_env
-                    hpt1     = addToHpt (hsc_HPT hsc_env2) this_mod mod_info
-                    hsc_env3 = hsc_env2 { hsc_HPT = hpt1, hsc_type_env_var = Nothing }
+                    -- We're done tying the knot, so we can lose the IORef
+                    hsc_env2 = hsc_env1 { hsc_type_env_var = Nothing }
 
                         -- Space-saving: delete the old HPT entry
                         -- for mod BUT if mod is a hs-boot
@@ -1351,14 +1318,14 @@ upsweep mHscMessage old_hpt stable_mods cleanup sccs = do
                         -- to make sure we have the final unfoldings, which may
                         -- not have been computed accurately in the previous
                         -- retypecheck.
-                hsc_env4 <- liftIO $ reTypecheckLoop hsc_env3 mod done'
-                setSession hsc_env4
+                liftIO $ reTypecheckLoop hsc_env2 mod done'
+                setSession hsc_env2
 
                         -- Add any necessary entries to the static pointer
                         -- table. See Note [Grand plan for static forms] in
                         -- StaticPtrTable.
-                when (hscTarget (hsc_dflags hsc_env4) == HscInterpreted) $
-                    liftIO $ hscAddSptEntries hsc_env4
+                when (hscTarget (hsc_dflags hsc_env2) == HscInterpreted) $
+                    liftIO $ hscAddSptEntries hsc_env2
                                  [ spt
                                  | Just linkable <- pure $ hm_linkable mod_info
                                  , unlinked <- linkableUnlinked linkable
@@ -1462,6 +1429,9 @@ upsweep_mod hsc_env mHscMessage old_hpt (stable_obj, stable_bco) summary mod_ind
                   compileOne' Nothing mHscMessage hsc_env summary' mod_index nmods
                              Nothing mb_linkable src_modified
 
+            add_it_to_hpt hmi = atomicModifyIORef' (hsc_HPT hsc_env) $
+              \hpt -> (addToHpt hpt this_mod_name hmi, hmi)
+
             -- With the HscNothing target we create empty linkables to avoid
             -- recompilation.  We have to detect these to recompile anyway if
             -- the target changed since the last compile.
@@ -1475,7 +1445,8 @@ upsweep_mod hsc_env mHscMessage old_hpt (stable_obj, stable_bco) summary mod_ind
             implies False _ = True
             implies True x  = x
 
-        in
+        -- put the linkable in the home package table
+        in add_it_to_hpt =<<
         case () of
          _
                 -- Regardless of whether we're generating object code or
@@ -1666,7 +1637,7 @@ re-typecheck.
 Following this fix, GHC can compile itself with --make -O2.
 -}
 
-reTypecheckLoop :: HscEnv -> ModSummary -> ModuleGraph -> IO HscEnv
+reTypecheckLoop :: HscEnv -> ModSummary -> ModuleGraph -> IO ()
 reTypecheckLoop hsc_env ms graph
   | Just loop <- getModLoop ms mss appearsAsBoot
   -- SOME hs-boot files should still
@@ -1675,7 +1646,7 @@ reTypecheckLoop hsc_env ms graph
                                  ms_mod l == ms_mod ms)) loop
   = typecheckLoop (hsc_dflags hsc_env) hsc_env (map ms_mod_name non_boot)
   | otherwise
-  = return hsc_env
+  = return ()
   where
   mss = mgModSummaries graph
   appearsAsBoot = (`elemModuleSet` mgBootModules graph)
@@ -1733,23 +1704,24 @@ getModLoop ms graph appearsAsBoot
 
 -- NB: sometimes mods has duplicates; this is harmless because
 -- any duplicates get clobbered in addListToHpt and never get forced.
-typecheckLoop :: DynFlags -> HscEnv -> [ModuleName] -> IO HscEnv
+typecheckLoop :: DynFlags -> HscEnv -> [ModuleName] -> IO ()
 typecheckLoop dflags hsc_env mods = do
   debugTraceMsg dflags 2 $
      text "Re-typechecking loop: " <> ppr mods
-  new_hpt <-
-    fixIO $ \new_hpt -> do
-      let new_hsc_env = hsc_env{ hsc_HPT = new_hpt }
-      mds <- initIfaceCheck (text "typecheckLoop") new_hsc_env $
-                mapM (typecheckIface . hm_iface) hmis
+  _ <- fixIO $ \new_hpt -> do
+      old_hpt <- atomicModifyIORef (hsc_HPT hsc_env) (new_hpt,)
+      let hmis    = map (expectJust "typecheckLoop" . lookupHpt old_hpt) mods
+          handleSourceError' = handleSourceError $ \e -> do
+            liftIO . printBagOfErrors dflags . srcErrorMessages $ e
+            pure Nothing
+      mds <- initIfaceCheck (text "typecheckLoop") hsc_env $
+                for hmis $
+                  handleSourceError'  . fmap Just . typecheckIface . hm_iface
       let new_hpt = addListToHpt old_hpt
                         (zip mods [ hmi{ hm_details = details }
-                                  | (hmi,details) <- zip hmis mds ])
+                                  | (hmi, Just details) <- zip hmis mds ])
       return new_hpt
-  return hsc_env{ hsc_HPT = new_hpt }
-  where
-    old_hpt = hsc_HPT hsc_env
-    hmis    = map (expectJust "typecheckLoop" . lookupHpt old_hpt) mods
+  return ()
 
 reachableBackwards :: ModuleName -> [ModSummary] -> [ModSummary]
 reachableBackwards mod summaries

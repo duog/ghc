@@ -178,6 +178,7 @@ import Data.Set (Set)
 newHscEnv :: DynFlags -> IO HscEnv
 newHscEnv dflags = do
     eps_var <- newIORef initExternalPackageState
+    hpt_var <- newIORef emptyHomePackageTable
     us      <- mkSplitUniqSupply 'r'
     nc_var  <- newIORef (initNameCache us knownKeyNames)
     fc_var  <- newIORef emptyInstalledModuleEnv
@@ -186,7 +187,7 @@ newHscEnv dflags = do
                   ,  hsc_targets      = []
                   ,  hsc_mod_graph    = emptyMG
                   ,  hsc_IC           = emptyInteractiveContext dflags
-                  ,  hsc_HPT          = emptyHomePackageTable
+                  ,  hsc_HPT          = hpt_var
                   ,  hsc_EPS          = eps_var
                   ,  hsc_NC           = nc_var
                   ,  hsc_FC           = fc_var
@@ -629,6 +630,42 @@ genericHscFrontend' mod_summary
 -- Compilers
 --------------------------------------------------------------
 
+-- | Add an interface to the mutable home package table inside an HscEnv.
+-- This function is called at the end of hscIncrementalCompile. If a
+-- ModDetails is provided, then this function does nothing interesting,
+-- it just adds the information to the table. If a ModDetails is not
+-- supplied, as happens when hscIncrementalCompile loads an up-to-date
+-- interface from an interface file, then that interface is typechecked
+-- with genModDetails before being added to the table.
+hscAddIfaceToHpt :: HscEnv
+                 -> ModSummary
+                 -> ModIface
+                 -> Maybe ModDetails
+                 -> IO HomeModInfo
+hscAddIfaceToHpt hsc_env mod_sum iface mb_details = case mb_details of
+  -- Knot tying!  See Note [Knot-tying typecheckIface]
+  Nothing -> liftIO .fixIO $ \hmi' -> do
+    atomicModifyIORef (hsc_HPT hsc_env) $ \hpt ->
+      (addToHpt hpt (ms_mod_name mod_sum) hmi', ())
+    -- NB: This result is actually not that useful
+    -- in one-shot mode, since we're not going to do
+    -- any further typechecking.  It's much more useful
+    -- in make mode, since this HMI will go into the HPT.
+    details <- genModDetails hsc_env iface
+    return HomeModInfo
+      { hm_details = details
+      , hm_iface = iface
+      , hm_linkable = Nothing
+      }
+  Just details -> do
+    let hmi = HomeModInfo
+          { hm_details = details
+          , hm_iface = iface
+          , hm_linkable = Nothing}
+    atomicModifyIORef' (hsc_HPT hsc_env) $ \hpt ->
+      (addToHpt hpt (ms_mod_name mod_sum) hmi, ())
+    return hmi
+
 -- Compile Haskell/boot in OneShot mode.
 hscIncrementalCompile :: Bool
                       -> Maybe TcGblEnv
@@ -661,33 +698,20 @@ hscIncrementalCompile always_do_basic_recompilation_check m_tc_result
     runHsc hsc_env $ do
     e <- hscIncrementalFrontend always_do_basic_recompilation_check m_tc_result mHscMessage
             mod_summary source_modified mb_old_iface mod_index
-    case e of
+    (status, iface, mb_details) <- case e of
         -- We didn't need to do any typechecking; the old interface
         -- file on disk was good enough.
-        Left iface -> do
-            -- Knot tying!  See Note [Knot-tying typecheckIface]
-            hmi <- liftIO . fixIO $ \hmi' -> do
-                let hsc_env' =
-                        hsc_env {
-                            hsc_HPT = addToHpt (hsc_HPT hsc_env)
-                                        (ms_mod_name mod_summary) hmi'
-                        }
-                -- NB: This result is actually not that useful
-                -- in one-shot mode, since we're not going to do
-                -- any further typechecking.  It's much more useful
-                -- in make mode, since this HMI will go into the HPT.
-                details <- genModDetails hsc_env' iface
-                return HomeModInfo{
-                    hm_details = details,
-                    hm_iface = iface,
-                    hm_linkable = Nothing }
-            return (HscUpToDate, hmi)
+        Left iface -> return (HscUpToDate, iface, Nothing)
         -- We finished type checking.  (mb_old_hash is the hash of
         -- the interface that existed on disk; it's possible we had
         -- to retypecheck but the resulting interface is exactly
         -- the same.)
-        Right (FrontendTypecheck tc_result, mb_old_hash) ->
-            finish hsc_env mod_summary tc_result mb_old_hash
+        Right (FrontendTypecheck tc_result, mb_old_hash) -> do
+            (status, iface, details) <-
+              finish hsc_env mod_summary tc_result mb_old_hash
+            return (status, iface, Just details)
+    hmi <- liftIO $ hscAddIfaceToHpt hsc_env mod_summary iface mb_details
+    return (status, hmi)
 
 -- Runs the post-typechecking frontend (desugar and simplify),
 -- and then generates and writes out the final interface. We want
@@ -698,7 +722,7 @@ finish :: HscEnv
        -> ModSummary
        -> TcGblEnv
        -> Maybe Fingerprint
-       -> Hsc (HscStatus, HomeModInfo)
+       -> Hsc (HscStatus, ModIface, ModDetails)
 finish hsc_env summary tc_result mb_old_hash = do
   let dflags = hsc_dflags hsc_env
       target = hscTarget dflags
@@ -734,10 +758,7 @@ finish hsc_env summary tc_result mb_old_hash = do
             return (iface, changed, details, HscRecomp cgguts summary)
       else mk_simple_iface
   liftIO $ hscMaybeWriteIface dflags iface changed summary
-  return
-    ( hsc_status
-    , HomeModInfo
-      {hm_details = details, hm_iface = iface, hm_linkable = Nothing})
+  return (hsc_status, iface, details)
 
 hscMaybeWriteIface :: DynFlags -> ModIface -> Bool -> ModSummary -> IO ()
 hscMaybeWriteIface dflags iface changed summary =
@@ -1068,9 +1089,9 @@ hscCheckSafe' dflags m l = do
     lookup' m = do
         hsc_env <- getHscEnv
         hsc_eps <- liftIO $ hscEPS hsc_env
+        hsc_hpt <- liftIO $ hscHPT hsc_env
         let pkgIfaceT = eps_PIT hsc_eps
-            homePkgT  = hsc_HPT hsc_env
-            iface     = lookupIfaceByModule dflags homePkgT pkgIfaceT m
+            iface     = lookupIfaceByModule dflags hsc_hpt pkgIfaceT m
         -- the 'lookupIfaceByModule' method will always fail when calling from GHCi
         -- as the compiler hasn't filled in the various module tables
         -- so we need to call 'getModuleInterface' to load from disk

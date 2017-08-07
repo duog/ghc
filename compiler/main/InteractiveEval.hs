@@ -101,16 +101,16 @@ import Exception
 getResumeContext :: GhcMonad m => m [Resume]
 getResumeContext = withSession (return . ic_resume . hsc_IC)
 
-mkHistory :: HscEnv -> ForeignHValue -> BreakInfo -> History
-mkHistory hsc_env hval bi = History hval bi (findEnclosingDecls hsc_env bi)
+mkHistory :: HomePackageTable -> ForeignHValue -> BreakInfo -> History
+mkHistory hpt hval bi = History hval bi (findEnclosingDecls hpt bi)
 
 getHistoryModule :: History -> Module
 getHistoryModule = breakInfo_module . historyBreakInfo
 
-getHistorySpan :: HscEnv -> History -> SrcSpan
-getHistorySpan hsc_env History{..} =
+getHistorySpan :: HomePackageTable -> History -> SrcSpan
+getHistorySpan hpt History{..} =
   let BreakInfo{..} = historyBreakInfo in
-  case lookupHpt (hsc_HPT hsc_env) (moduleName breakInfo_module) of
+  case lookupHpt hpt (moduleName breakInfo_module) of
     Just hmi -> modBreaks_locs (getModBreaks hmi) ! breakInfo_number
     _ -> panic "getHistorySpan"
 
@@ -126,10 +126,10 @@ getModBreaks hmi
 -- ToDo: a better way to do this would be to keep hold of the decl_path computed
 -- by the coverage pass, which gives the list of lexically-enclosing bindings
 -- for each tick.
-findEnclosingDecls :: HscEnv -> BreakInfo -> [String]
-findEnclosingDecls hsc_env (BreakInfo modl ix) =
+findEnclosingDecls :: HomePackageTable -> BreakInfo -> [String]
+findEnclosingDecls hpt (BreakInfo modl ix) =
    let hmi = expectJust "findEnclosingDecls" $
-             lookupHpt (hsc_HPT hsc_env) (moduleName modl)
+             lookupHpt hpt (moduleName modl)
        mb = getModBreaks hmi
    in modBreaks_decls mb ! ix
 
@@ -267,8 +267,9 @@ handleRunStatus step expr bindings final_ids status history
     , not is_exception
     = do
        hsc_env <- getSession
+       hpt <- liftIO $ hscHPT hsc_env
        let hmi = expectJust "handleRunStatus" $
-                   lookupHptDirectly (hsc_HPT hsc_env)
+                   lookupHptDirectly hpt
                                      (mkUniqueGrimily mod_uniq)
            modl = mi_module (hm_iface hmi)
            breaks = getModBreaks hmi
@@ -282,7 +283,7 @@ handleRunStatus step expr bindings final_ids status history
          else do
            apStack_fhv <- liftIO $ mkFinalizedHValue hsc_env apStack_ref
            let bi = BreakInfo modl ix
-               !history' = mkHistory hsc_env apStack_fhv bi `consBL` history
+               !history' = mkHistory hpt apStack_fhv bi `consBL` history
                  -- history is strict, otherwise our BoundedList is pointless.
            fhv <- liftIO $ mkFinalizedHValue hsc_env resume_ctxt
            status <- liftIO $ GHCi.resumeStmt hsc_env True fhv
@@ -296,10 +297,11 @@ handleRunStatus step expr bindings final_ids status history
     | EvalBreak is_exception apStack_ref ix mod_uniq resume_ctxt ccs <- status
     = do
          hsc_env <- getSession
+         hpt <- liftIO $ hscHPT hsc_env
          resume_ctxt_fhv <- liftIO $ mkFinalizedHValue hsc_env resume_ctxt
          apStack_fhv <- liftIO $ mkFinalizedHValue hsc_env apStack_ref
          let hmi = expectJust "handleRunStatus" $
-                     lookupHptDirectly (hsc_HPT hsc_env)
+                     lookupHptDirectly hpt
                                        (mkUniqueGrimily mod_uniq)
              modl = mi_module (hm_iface hmi)
              bp | is_exception = Nothing
@@ -366,6 +368,7 @@ resumeExec canLogSpan step
                             , let n = getName thing
                             , not (n `elem` old_names) ]
         liftIO $ Linker.deleteFromLinkEnv new_names
+        hpt <- liftIO $ hscHPT hsc_env
 
         case r of
           Resume { resumeStmt = expr, resumeContext = fhv
@@ -380,7 +383,7 @@ resumeExec canLogSpan step
                        Nothing -> prevHistoryLst
                        Just bi
                          | not $canLogSpan span -> prevHistoryLst
-                         | otherwise -> mkHistory hsc_env apStack bi `consBL`
+                         | otherwise -> mkHistory hpt apStack bi `consBL`
                                                         fromListBL 50 hist
                 handleRunStatus step expr bindings final_ids status hist'
 
@@ -466,9 +469,10 @@ bindLocalsAtBreakpoint hsc_env apStack Nothing = do
 -- Just case: we stopped at a breakpoint, we have information about the location
 -- of the breakpoint and the free variables of the expression.
 bindLocalsAtBreakpoint hsc_env apStack_fhv (Just BreakInfo{..}) = do
+   hpt <- hscHPT hsc_env
    let
        hmi       = expectJust "bindLocalsAtBreakpoint" $
-                     lookupHpt (hsc_HPT hsc_env) (moduleName breakInfo_module)
+                     lookupHpt hpt (moduleName breakInfo_module)
        breaks    = getModBreaks hmi
        info      = expectJust "bindLocalsAtBreakpoint2" $
                      IntMap.lookup breakInfo_number (modBreaks_breakInfo breaks)
@@ -670,6 +674,10 @@ findGlobalRdrEnv :: HscEnv -> [InteractiveImport]
 findGlobalRdrEnv hsc_env imports
   = do { idecls_env <- hscRnImportDecls hsc_env idecls
                     -- This call also loads any orphan modules
+       ; hpt <- hscHPT hsc_env
+       ; let mkEnv mod = case mkTopLevEnv hpt mod of
+               Left err -> Left (mod, err)
+               Right env -> Right env
        ; return $ case partitionEithers (map mkEnv imods) of
            ([], imods_env) -> Right (foldr plusGlobalRdrEnv idecls_env imods_env)
            (err : _, _)    -> Left err }
@@ -679,10 +687,6 @@ findGlobalRdrEnv hsc_env imports
 
     imods :: [ModuleName]
     imods = [m | IIModule m <- imports]
-
-    mkEnv mod = case mkTopLevEnv (hsc_HPT hsc_env) mod of
-      Left err -> Left (mod, err)
-      Right env -> Right env
 
 availsToGlobalRdrEnv :: ModuleName -> [AvailInfo] -> GlobalRdrEnv
 availsToGlobalRdrEnv mod_name avails
@@ -716,8 +720,10 @@ getContext = withSession $ \HscEnv{ hsc_IC=ic } ->
 moduleIsInterpreted :: GhcMonad m => Module -> m Bool
 moduleIsInterpreted modl = withSession $ \h ->
  if moduleUnitId modl /= thisPackage (hsc_dflags h)
-        then return False
-        else case lookupHpt (hsc_HPT h) (moduleName modl) of
+   then return False
+   else do
+     hpt <- liftIO $ hscHPT h
+     case lookupHpt hpt (moduleName modl) of
                 Just details       -> return (isJust (mi_globals (hm_iface details)))
                 _not_a_home_module -> return False
 
@@ -908,8 +914,9 @@ showModule mod_summary =
         return (showModMsg dflags (hscTarget dflags) interpreted mod_summary)
 
 moduleIsBootOrNotObjectLinkable :: GhcMonad m => ModSummary -> m Bool
-moduleIsBootOrNotObjectLinkable mod_summary = withSession $ \hsc_env ->
-  case lookupHpt (hsc_HPT hsc_env) (ms_mod_name mod_summary) of
+moduleIsBootOrNotObjectLinkable mod_summary = withSession $ \hsc_env -> do
+  hpt <- liftIO $ hscHPT hsc_env
+  case lookupHpt hpt (ms_mod_name mod_summary) of
         Nothing       -> panic "missing linkable"
         Just mod_info -> return $ case hm_linkable mod_info of
           Nothing       -> True

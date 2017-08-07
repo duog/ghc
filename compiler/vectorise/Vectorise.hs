@@ -45,9 +45,10 @@ vectoriseIO :: HscEnv -> ModGuts -> IO ModGuts
 vectoriseIO hsc_env guts
  = do {   -- Get information about currently loaded external packages.
       ; eps <- hscEPS hsc_env
+      ; hpt <- hscHPT hsc_env
 
           -- Combine vectorisation info from the current module, and external ones.
-      ; let info = hptVectInfo hsc_env `plusVectInfo` eps_vect_info eps
+      ; let info = hptVectInfo hpt `plusVectInfo` eps_vect_info eps
 
           -- Run the main VM computation.
       ; Just (info', guts') <- initV hsc_env guts info (vectModule guts)
