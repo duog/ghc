@@ -11,6 +11,7 @@
 module HscTypes (
         -- * compilation state
         HscEnv(..), hscEPS, hscHPT,
+        HscYield(..), defaultHscYield,
         FinderCache, FindResult(..), InstalledFindResult(..),
         Target(..), TargetId(..), pprTarget, pprTargetId,
         HscStatus(..),
@@ -436,7 +437,29 @@ data HscEnv
         , hsc_iserv :: MVar (Maybe IServ)
                 -- ^ interactive server process.  Created the first
                 -- time it is needed.
- }
+        , hsc_yield :: HscYield
+                -- ^ Several callbacks to yield control back to the compilation
+                -- manager.
+  }
+
+data HscYield = HscYield
+  { yieldParsedSource ::
+      HscEnv -> ModSummary ->  IO ()
+  , yieldTypecheckedInterface ::
+      HscEnv -> ModSummary -> HomeModInfo -> IO ()
+  , yieldSimplifiedInterface ::
+      HscEnv -> ModSummary -> HomeModInfo -> IO ()
+  , awaitDependencyInterfaces ::
+      HscEnv -> ModSummary -> IO ()
+  }
+
+defaultHscYield :: HscYield
+defaultHscYield = HscYield
+  { yieldParsedSource = \_ _ -> return ()
+  , yieldTypecheckedInterface = \_ _ _ -> return ()
+  , yieldSimplifiedInterface = \_ _ _ -> return ()
+  , awaitDependencyInterfaces = \_ _ -> return ()
+  }
 
 -- Note [hsc_type_env_var hack]
 -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -192,7 +192,8 @@ newHscEnv dflags = do
                   ,  hsc_NC           = nc_var
                   ,  hsc_FC           = fc_var
                   ,  hsc_type_env_var = Nothing
-                  , hsc_iserv        = iserv_mvar
+                  ,  hsc_iserv        = iserv_mvar
+                  ,  hsc_yield        = defaultHscYield
                   }
 
 -- -----------------------------------------------------------------------------
@@ -422,6 +423,7 @@ hscTypecheck keep_rn mod_summary mb_rdr_module = do
          do hpm <- case mb_rdr_module of
                     Just hpm -> return hpm
                     Nothing -> hscParse' mod_summary
+            hscYieldParsedSource mod_summary hpm
             tc_result0 <- tcRnModule' hsc_env mod_summary keep_rn hpm
             if hsc_src == HsigFile
                 then do (iface, _, _) <- liftIO $ hscSimpleIface hsc_env tc_result0 Nothing
@@ -450,6 +452,10 @@ tcRnModule' hsc_env sum save_rn_syntax mod = do
 
         -- module (could be) safe, throw warning if needed
         else do
+            -- hscCheckSafeImports will consult with dependent interfaces
+            -- interfaces in the home package table, so we must wait here
+            -- until they are all loaded.
+            hscAwaitDependencyInterfaces sum
             tcg_res' <- hscCheckSafeImports tcg_res
             safe <- liftIO $ fst <$> readIORef (tcg_safeInfer tcg_res')
             when safe $ do
@@ -577,6 +583,7 @@ hscIncrementalFrontend
                      SourceUnmodifiedAndStable -> True
                      _                         -> False
 
+        await_deps = awaitDependencyInterfaces . hsc_yield $ hsc_env
     case m_tc_result of
          Just tc_result
           | not always_do_basic_recompilation_check ->
@@ -585,7 +592,7 @@ hscIncrementalFrontend
             (recomp_reqd, mb_checked_iface)
                 <- {-# SCC "checkOldIface" #-}
                    liftIO $ checkOldIface hsc_env mod_summary
-                                source_modified mb_old_iface
+                                source_modified mb_old_iface await_deps
             -- save the interface that comes back from checkOldIface.
             -- In one-shot mode we don't have the old iface until this
             -- point, when checkOldIface reads it from the disk.
@@ -630,13 +637,65 @@ genericHscFrontend' mod_summary
 -- Compilers
 --------------------------------------------------------------
 
--- | Add an interface to the mutable home package table inside an HscEnv.
--- This function is called at the end of hscIncrementalCompile. If a
--- ModDetails is provided, then this function does nothing interesting,
--- it just adds the information to the table. If a ModDetails is not
--- supplied, as happens when hscIncrementalCompile loads an up-to-date
--- interface from an interface file, then that interface is typechecked
--- with genModDetails before being added to the table.
+-- | Yield control to the compilation manager after a module has been
+-- parsed. When this returns, the home package table is guaranteed to have
+-- entries for all dependencies of the ModSummary, though these may be
+-- simple interfaces as returned from mkIfaceTc. Note that these
+-- dependencies may include modules other than textual imports if
+-- the module graph contains hs-boot loops. See Note [TODO DOUG GhcMake].
+-- the HsParsedModule is not used, and is present only for consistency.
+hscYieldParsedSource :: ModSummary -> HsParsedModule -> Hsc ()
+hscYieldParsedSource mod_summary _ = do
+  hsc_env <- getHscEnv
+  liftIO $ (yieldParsedSource . hsc_yield) hsc_env hsc_env mod_summary
+
+-- | Yield control to the compilation manager after a module has been
+-- typechecked and desugared, but not simplified. When this returns, the
+-- home package table is guaranteed to have full interface entries for
+-- all dependencies of the ModSummary, with all unfoldings etc. As with
+-- hscYieldParsedSource, these dependencies may include more modules than
+-- you would expect. See Note [TODO DOUG GhcMake]
+-- The HomeModInfo returned has already been added to the home package table.
+hscYieldTypecheckedInterface :: ModSummary
+                             -> ModIface
+                             -> Maybe ModDetails
+                             -> Hsc HomeModInfo
+hscYieldTypecheckedInterface mod_summary iface mb_details = do
+  hsc_env <- getHscEnv
+  liftIO $ do
+    hmi <- hscAddIfaceToHpt hsc_env mod_summary iface mb_details
+    (yieldTypecheckedInterface . hsc_yield) hsc_env hsc_env mod_summary hmi
+    return hmi
+
+-- | Yield control to the compilation manager after a module has been
+-- simplified. The HomeModInfo returned has already been added to the home
+-- package table.
+hscYieldSimplifiedInterface :: ModSummary
+                            -> ModIface
+                            -> Maybe ModDetails
+                            -> Hsc HomeModInfo
+hscYieldSimplifiedInterface mod_summary iface mb_details = do
+  hsc_env <- getHscEnv
+  liftIO $ do
+    hmi <- hscAddIfaceToHpt hsc_env mod_summary iface mb_details
+    (yieldSimplifiedInterface . hsc_yield) hsc_env hsc_env mod_summary hmi
+    return hmi
+
+-- | Yield control to the compilation manager while we wait for dependent
+-- interfaces to be loaded. TODO DOUG - clarify whether the interfaces are
+-- typechecked or simplified.
+hscAwaitDependencyInterfaces :: ModSummary -> Hsc ()
+hscAwaitDependencyInterfaces mod_summary = do
+  hsc_env <- getHscEnv
+  liftIO $ (awaitDependencyInterfaces . hsc_yield) hsc_env hsc_env mod_summary
+
+-- | Add an interface to the mutable home package table inside an HscEnv. This
+-- function is called during hscYieldTypecheckedInterface and
+-- hscYieldSimplifiedInterface. If a ModDetails is provided, then this function
+-- does nothing interesting, it just adds the information to the table. If a
+-- ModDetails is not supplied, as happens when hscIncrementalCompile loads an
+-- up-to-date interface from an interface file, then that interface is
+-- typechecked with genModDetails before being added to the table.
 hscAddIfaceToHpt :: HscEnv
                  -> ModSummary
                  -> ModIface
@@ -701,7 +760,9 @@ hscIncrementalCompile always_do_basic_recompilation_check m_tc_result
     (status, iface, mb_details) <- case e of
         -- We didn't need to do any typechecking; the old interface
         -- file on disk was good enough.
-        Left iface -> return (HscUpToDate, iface, Nothing)
+        Left iface ->
+
+          return (HscUpToDate, iface, Nothing)
         -- We finished type checking.  (mb_old_hash is the hash of
         -- the interface that existed on disk; it's possible we had
         -- to retypecheck but the resulting interface is exactly
@@ -710,7 +771,7 @@ hscIncrementalCompile always_do_basic_recompilation_check m_tc_result
             (status, iface, details) <-
               finish hsc_env mod_summary tc_result mb_old_hash
             return (status, iface, Just details)
-    hmi <- liftIO $ hscAddIfaceToHpt hsc_env mod_summary iface mb_details
+    hmi <- hscYieldSimplifiedInterface mod_summary iface mb_details
     return (status, hmi)
 
 -- Runs the post-typechecking frontend (desugar and simplify),
@@ -752,6 +813,24 @@ finish hsc_env summary tc_result mb_old_hash = do
           -- and generate a simple interface.
           then mk_simple_iface
           else do
+            (simple_iface, _, simple_details) <- liftIO $
+              hscSimpleIface hsc_env tc_result mb_old_hash
+            -- TODO DOUG:
+            -- This is quite clearly wrong. When hscYieldTypecheckedInterface
+            -- returns, all our dependencies are simplified in the home package
+            -- table, however desugared_guts0 is still pointing to the Ids in
+            -- our original TcGblEnv, which will not have unfoldings if they
+            -- were loaded from a simple interface.
+            -- I don't know if this is fixable. If it is not, we may as well
+            -- merge the typechecking and simplification MakePipeline stages.
+            -- This is worked around by having MP_Typecheck MakeTasks depend
+            -- on the MP_Simplify MakeTasks of dependencies.
+            -- We leave this hscYieldTypecheckedInterface here, for now, to
+            -- include it's cost in benchmarks.
+            -- See Trac #14095 for some illumination of the names in this
+            -- comment.
+            _ <- hscYieldTypecheckedInterface summary simple_iface
+              (Just simple_details)
             desugared_guts <- hscSimplify' desugared_guts0
             (iface, changed, details, cgguts) <-
               liftIO $ hscNormalIface hsc_env desugared_guts mb_old_hash

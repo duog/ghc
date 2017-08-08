@@ -1098,10 +1098,14 @@ checkOldIface
   :: HscEnv
   -> ModSummary
   -> SourceModified
-  -> Maybe ModIface         -- Old interface from compilation manager, if any
+  -> Maybe ModIface         -- ^ Old interface from compilation manager, if any
+  -> (HscEnv -> ModSummary -> IO ())
+  -- ^ IO action to wait for dependent interfaces to be loaded. If we find that
+  -- we need to consult the home package table for dependent interfaces, we
+  -- MUST call this action first.
   -> IO (RecompileRequired, Maybe ModIface)
 
-checkOldIface hsc_env mod_summary source_modified maybe_iface
+checkOldIface hsc_env mod_summary source_modified maybe_iface await_dep_ifaces
   = do  let dflags = hsc_dflags hsc_env
         showPass dflags $
             "Checking old interface for " ++
@@ -1109,15 +1113,17 @@ checkOldIface hsc_env mod_summary source_modified maybe_iface
               " (use -ddump-hi-diffs for more details)"
         initIfaceCheck (text "checkOldIface") hsc_env $
             check_old_iface hsc_env mod_summary source_modified maybe_iface
+              await_dep_ifaces
 
 check_old_iface
   :: HscEnv
   -> ModSummary
   -> SourceModified
   -> Maybe ModIface
+  -> (HscEnv -> ModSummary -> IO ())
   -> IfG (RecompileRequired, Maybe ModIface)
 
-check_old_iface hsc_env mod_summary src_modified maybe_iface
+check_old_iface hsc_env mod_summary src_modified maybe_iface await_dep_ifaces
   = let dflags = hsc_dflags hsc_env
         getIface =
             case maybe_iface of
@@ -1169,8 +1175,13 @@ check_old_iface hsc_env mod_summary src_modified maybe_iface
                     -- We have got the old iface; check its versions
                     -- even in the SourceUnmodifiedAndStable case we
                     -- should check versions because some packages
-                    -- might have changed or gone away.
-                    Just iface -> checkVersions hsc_env mod_summary iface
+                    -- might have changed or gone away. This will consult
+                    -- the home package table for the interfaces of our
+                    -- dependencies, so we must first call await_dep_ifaces
+                    -- to ensure that those interfaces have been loaded.
+                    Just iface -> do
+                      liftIO $ await_dep_ifaces hsc_env mod_summary
+                      checkVersions hsc_env mod_summary iface
 
 -- | Check if a module is still the same 'version'.
 --
