@@ -72,7 +72,7 @@ test('T1969',
              # 2017-03-24 9261052 (x86/Linux, 64-bit machine)
              # 2017-04-06 9418680 (x86/Linux, 64-bit machine)
 
-           (wordsize(64), 16679176, 15)]),
+           (wordsize(64), 19429216, 15)]),
              # 2014-09-10 10463640, 10  # post-AMP-update (somewhat stabelish)
                # looks like the peak is around ~10M, but we're
                # unlikely to GC exactly on the peak.
@@ -87,6 +87,7 @@ test('T1969',
              # 2017-02-01 19924328 (amd64/Linux) Join points (#12988)
              # 2017-02-14 16393848 Early inline patch
              # 2017-03-31 16679176 Fix memory leak in simplifier
+             # 2017-08-10 19429216 Improve parallelism in --make
 
       compiler_stats_num_field('bytes allocated',
           [(platform('i386-unknown-mingw32'), 301784492, 5),
@@ -459,8 +460,8 @@ test('T5631',
         # 2017-02-17:     1517484488 (amd64/Linux) Type-indexed Typeable
         # 2017-03-03:     1065147968 (amd64/Linux) Share Typeable KindReps
         # 2017-03-31:     1037482512 (amd64/Linux) Fix memory leak in simplifier
-	# 2017-07-27:     1106015512 (Mac) Regresssion from tracking visibility in TypeEqOrigin
-	#                                  should be fixed by #14037
+  # 2017-07-27:     1106015512 (Mac) Regresssion from tracking visibility in TypeEqOrigin
+  #                                  should be fixed by #14037
        only_ways(['normal'])
       ],
      compile,
