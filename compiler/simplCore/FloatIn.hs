@@ -13,7 +13,7 @@ then discover that they aren't needed in the chosen branch.
 -}
 
 {-# LANGUAGE CPP #-}
-{-# OPTIONS_GHC -fprof-auto #-}
+-- {-# OPTIONS_GHC -fprof-auto #-}
 
 module FloatIn ( floatInwards ) where
 

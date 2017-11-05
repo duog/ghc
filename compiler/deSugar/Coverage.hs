@@ -3,9 +3,9 @@
 (c) University of Glasgow, 2007
 -}
 
-{-# LANGUAGE NondecreasingIndentation, RecordWildCards #-}
+{-# LANGUAGE NondecreasingIndentation, RecordWildCards, TupleSections #-}
 
-module Coverage (addTicksToBinds, hpcInitCode) where
+module Coverage (addTicksToBinds, hpcInitCode, addTicksToBindsCore) where
 
 import GhcPrelude as Prelude
 
@@ -40,6 +40,7 @@ import MonadUtils
 import Maybes
 import CLabel
 import Util
+import CoreUtils
 
 import Data.Time
 import System.Directory
@@ -49,6 +50,8 @@ import Trace.Hpc.Util
 
 import Data.Map (Map)
 import qualified Data.Map as Map
+
+import Data.Traversable
 
 {-
 ************************************************************************
@@ -1034,7 +1037,8 @@ coveragePasses dflags =
     ifa (hscTarget dflags == HscInterpreted) Breakpoints $
     ifa (gopt Opt_Hpc dflags)                HpcTicks $
     ifa (gopt Opt_SccProfilingOn dflags &&
-         profAuto dflags /= NoProfAuto)      ProfNotes $
+         profAuto dflags `notElem ` [NoProfAuto, ProfCore]
+        ) ProfNotes $
     ifa (debugLevel dflags > 0)              SourceNotes []
   where ifa f x xs | f         = x:xs
                    | otherwise = xs
@@ -1347,3 +1351,122 @@ hpcInitCode this_mod (HpcInfo tickCount hashNo)
        = module_name
        | otherwise
        = package_name <> char '/' <> module_name
+
+addTicksToBindsCore :: DynFlags -> Module -> ModLocation -> CoreProgram -> IO CoreProgram
+addTicksToBindsCore dflags mod mod_loc pgm
+  | profAuto dflags == ProfCore
+  , gopt Opt_SccProfilingOn dflags
+  , Just orig_file <- ml_hs_file mod_loc
+  , not ("boot" `isSuffixOf` orig_file) = do
+     us <- mkSplitUniqSupply 'C' -- for cost centres
+     let
+       orig_file2 = orig_file
+       env = TTE
+         { fileName     = mkFastString orig_file2
+         , declPath     = []
+         , tte_dflags   = dflags
+         , exports      = emptyNameSet
+         , inlines      = emptyVarSet
+         , inScope      = emptyVarSet
+         , blackList    = Map.empty
+         , density      = undefined
+         , this_mod     = mod
+         , tickishType  = undefined
+         }
+       initState = TT { tickBoxCount = 0
+                      , mixEntries   = []
+                      , uniqSupply   = us
+                      }
+       (pgm',_,_) = unTM (traverse (addTickCoreBind True) pgm) env initState
+     return pgm'
+  | otherwise = pure pgm
+  where
+
+addTickCoreBind :: Bool -> CoreBind -> TM CoreBind
+addTickCoreBind top_level bind = case bind of
+      NonRec b e -> NonRec b <$> addTickCoreBind' top_level b e
+      Rec binds ->
+        fmap Rec . for binds $ \(b, e) -> (b,) <$> addTickCoreBind' top_level b e
+
+addTickCoreBind' :: Bool -> CoreBndr -> CoreExpr -> TM CoreExpr
+addTickCoreBind' top_level bindr = go top_level
+  where
+    go top_level e
+      -- don't tick top level unlifted bindings
+      | top_level, t <- exprType e , isUnliftedType t = addTickCoreExpr e
+      | otherwise = do
+        dflags <- getDynFlags
+        let
+          tick_exp = withTick (gopt Opt_ProfCoreTickBinds) bindr "" . addTickCoreExpr
+        case e of
+          -- We push the tick inside the lambda, tick or cast
+          Lam b e -> Lam b <$> go False e
+          Tick t e
+            | gopt Opt_ProfCoreDropTicks dflags  -> go False e
+            | otherwise -> Tick t <$> go False e
+          Cast e c -> Cast <$> go False e <*> pure c
+          -- these are interesting
+          Let {} -> tick_exp e
+          Case {} -> tick_exp e
+          -- Vars, Lits, Types, Coercions, Apps are uninteresting
+          _ -> pure e
+
+addTickCoreExpr :: CoreExpr -> TM CoreExpr
+addTickCoreExpr exp = do
+  dflags <- getDynFlags
+  case exp of
+  -- Apps are very simple in coreprep, can't have anything interesting in them
+    App {} -> pure exp
+    Lam b e -> Lam b <$> addTickCoreExpr e
+    Let b e -> Let <$> addTickCoreBind False b <*> addTickCoreExpr e
+    Case e b t as -> let
+      should_tick_alts = case as of
+        -- only tick alts if there are at least two alternatives
+        _ : _ : _ -> True
+        _ -> False
+      tick_alts = traverse
+        (uncurry $ addTickAlt should_tick_alts b)
+        (zip [1..] as)
+      in Case
+      <$> do
+        withTick (gopt Opt_ProfCoreTickCases) b "scr$" . addTickCoreExpr $ e
+      <*> pure b
+      <*> pure t
+      <*> tick_alts
+    Cast e c -> Cast <$> addTickCoreExpr e <*> pure c
+    Tick t e
+      | gopt Opt_ProfCoreDropTicks dflags -> addTickCoreExpr e
+      | otherwise -> Tick t <$> addTickCoreExpr e
+    _ -> pure exp
+
+addTickAlt :: Bool -> Id -> Int -> CoreAlt -> TM CoreAlt
+addTickAlt should_tick_alt b idx (ac, bs, e) = let
+  prefix = ("alt" ++ show idx ++ "$")
+  tick_alt
+    | should_tick_alt = withTick (gopt Opt_ProfCoreTickAlts) b prefix
+    | otherwise = id
+  in fmap (ac, bs,) . tick_alt . addTickCoreExpr $ e
+
+withTick :: (DynFlags -> Bool) -> Id -> String -> TM CoreExpr -> TM CoreExpr
+withTick pred i prefix expM = do
+  should_tick <- pred `fmap` getDynFlags
+  if should_tick
+    then do
+      let
+        name = prefix ++ occNameString (occName i)
+        src_loc = getSrcSpan i
+      tickish <- mkTickishCore name src_loc
+      exp <- addPathEntry name expM
+      return $ Tick tickish exp
+    else expM
+
+mkTickishCore :: String -> SrcSpan -> TM (Tickish Id)
+mkTickishCore name src_loc = do
+  dflags <- getDynFlags
+  let count_entries = gopt Opt_ProfCountEntries dflags
+  decl_path <- getPathEntry
+  cc_unique <- getUniqueM
+  env <- getEnv
+  let cc_name = concat (intersperse "." (decl_path ++ [name]))
+      cc = mkUserCC (mkFastString cc_name) (this_mod env) src_loc cc_unique
+  return $ ProfNote cc count_entries True

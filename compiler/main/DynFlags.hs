@@ -485,6 +485,11 @@ data GeneralFlag
    -- profiling opts
    | Opt_AutoSccsOnIndividualCafs
    | Opt_ProfCountEntries
+   | Opt_ProfCoreDropTicks
+   | Opt_ProfCoreTickCases
+   | Opt_ProfCoreTickBinds
+   | Opt_ProfCoreTickCalls
+   | Opt_ProfCoreTickAlts
 
    -- misc opts
    | Opt_Pp
@@ -1007,6 +1012,7 @@ data ProfAuto
   | ProfAutoTop        -- ^ top-level functions annotated only
   | ProfAutoExports    -- ^ exported functions annotated only
   | ProfAutoCalls      -- ^ annotate call-sites
+  | ProfCore           -- ^ annotate Core after simplification
   deriving (Eq,Enum)
 
 data LlvmTarget = LlvmTarget
@@ -3304,6 +3310,8 @@ dynamic_flags_deps = [
       (noArg (\d -> d { profAuto = ProfAutoExports } ))
   , make_ord_flag defGhcFlag "fprof-auto-calls"
       (noArg (\d -> d { profAuto = ProfAutoCalls } ))
+  , make_ord_flag defGhcFlag "fprof-core"
+      (noArg (\d -> d { profAuto = ProfCore } ))
   , make_ord_flag defGhcFlag "fno-prof-auto"
       (noArg (\d -> d { profAuto = NoProfAuto } ))
 
@@ -3781,6 +3789,11 @@ fFlagsDeps = [
   flagSpec "print-typechecker-elaboration"    Opt_PrintTypecheckerElaboration,
   flagSpec "prof-cafs"                        Opt_AutoSccsOnIndividualCafs,
   flagSpec "prof-count-entries"               Opt_ProfCountEntries,
+  flagSpec "prof-core-drop-ticks"             Opt_ProfCoreDropTicks,
+  flagSpec "prof-core-tick-cases"             Opt_ProfCoreTickCases,
+  flagSpec "prof-core-tick-binds"             Opt_ProfCoreTickBinds,
+  flagSpec "prof-core-tick-calls"             Opt_ProfCoreTickCalls,
+  flagSpec "prof-core-tick-alts"              Opt_ProfCoreTickAlts,
   flagSpec "regs-graph"                       Opt_RegsGraph,
   flagSpec "regs-iterative"                   Opt_RegsIterative,
   depFlagSpec' "rewrite-rules"                Opt_EnableRewriteRules
@@ -4050,6 +4063,11 @@ defaultFlags settings
       Opt_OmitYields,
       Opt_PrintBindContents,
       Opt_ProfCountEntries,
+      Opt_ProfCoreDropTicks,
+      Opt_ProfCoreTickCases,
+      Opt_ProfCoreTickBinds,
+      Opt_ProfCoreTickCalls,
+      Opt_ProfCoreTickAlts,
       Opt_RPath,
       Opt_SharedImplib,
       Opt_SimplPreInlining,

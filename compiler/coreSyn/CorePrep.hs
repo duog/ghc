@@ -40,6 +40,7 @@ import VarSet
 import VarEnv
 import Id
 import IdInfo
+import Coverage
 import TysWiredIn
 import DataCon
 import PrimOp
@@ -186,8 +187,10 @@ corePrepPgm hsc_env this_mod mod_loc binds data_tycons =
                       floats2 <- corePrepTopBinds initialCorePrepEnv implicit_binds
                       return (deFloatTop (floats1 `appendFloats` floats2))
 
-    endPassIO hsc_env alwaysQualify CorePrep binds_out []
-    return binds_out
+    ticked_binds_out <- addTicksToBindsCore dflags this_mod mod_loc binds_out
+
+    endPassIO hsc_env alwaysQualify CorePrep ticked_binds_out []
+    return ticked_binds_out
   where
     dflags = hsc_dflags hsc_env
 

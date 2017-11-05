@@ -4,7 +4,7 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# OPTIONS_GHC -fprof-auto-top #-}
+-- {-# OPTIONS_GHC -fprof-auto-top #-}
 
 --
 -- Copyright (c) 2010, João Dias, Simon Marlow, Simon Peyton Jones,

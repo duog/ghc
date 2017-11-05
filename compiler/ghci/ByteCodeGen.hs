@@ -1,6 +1,6 @@
 {-# LANGUAGE CPP, MagicHash, RecordWildCards, BangPatterns #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# OPTIONS_GHC -fprof-auto-top #-}
+-- {-# OPTIONS_GHC -fprof-auto-top #-}
 --
 --  (c) The University of Glasgow 2002-2006
 --
