@@ -200,19 +200,28 @@ lintStgExpr (StgCase scrut bndr alts_type alts) = runMaybeT $ do
     _ <- MaybeT $ lintStgExpr scrut
 
     lf <- liftMaybeT getLintFlags
-    in_scope <- MaybeT $ liftM Just $
+    bndr_in_scope_and_well_typed <- liftMaybeT $
      case alts_type of
         AlgAlt tc     -> check_bndr (tyConPrimRep tc) >> return True
         PrimAlt rep   -> check_bndr [rep]             >> return True
-        -- Case binders of unboxed tuple or unboxed sum type always dead
+        -- Case binders of unboxed tuple or unboxed sum type are always dead
         -- after the unariser has run. See Note [Post-unarisation invariants].
+        --
+        -- The unariser may change the type of the scrutinee to remove void
+        -- fields from an unboxed tuple or unboxed sum type.
+        -- This could potentially be improved be computing the correct type.
+        -- See #14536
         MultiValAlt _
           | lf_unarised lf -> return False
           | otherwise      -> return True
         PolyAlt       -> return True
 
-    MaybeT $ addInScopeVars [bndr | in_scope] $
-             lintStgAlts alts scrut_ty
+    let
+      mb_scrut_ty
+        | bndr_in_scope_and_well_typed = Just scrut_ty
+        | otherwise = Nothing
+    MaybeT $ addInScopeVars [bndr | bndr_in_scope_and_well_typed] $
+             lintStgAlts alts mb_scrut_ty
   where
     scrut_ty        = idType bndr
     scrut_reps      = typePrimRep scrut_ty
@@ -221,11 +230,13 @@ lintStgExpr (StgCase scrut bndr alts_type alts) = runMaybeT $ do
                      bad_bndr = mkDefltMsg bndr reps
 
 lintStgAlts :: [StgAlt]
-            -> Type               -- Type of scrutinee
-            -> LintM (Maybe Type) -- Just ty => type is accurage
+            -> Maybe Type
+            -- ^ Type of scrutinee. If the unariser may have changed the type
+            -- of the scrutinee, then this will be Nothing.
+            -> LintM (Maybe Type) -- ^ Just ty => type is accurate
 
-lintStgAlts alts scrut_ty = do
-    maybe_result_tys <- mapM (lintAlt scrut_ty) alts
+lintStgAlts alts mb_scrut_ty = do
+    maybe_result_tys <- mapM (lintAlt mb_scrut_ty) alts
 
     -- Check the result types
     case catMaybes (maybe_result_tys) of
@@ -238,33 +249,37 @@ lintStgAlts alts scrut_ty = do
           -- We can't check that the alternatives have the
           -- same type, because they don't, with unsafeCoerce#
 
-lintAlt :: Type -> (AltCon, [Id], StgExpr) -> LintM (Maybe Type)
+lintAlt :: Maybe Type -> (AltCon, [Id], StgExpr) -> LintM (Maybe Type)
 lintAlt _ (DEFAULT, _, rhs)
  = lintStgExpr rhs
 
-lintAlt scrut_ty (LitAlt lit, _, rhs) = do
-   checkTys (literalType lit) scrut_ty (mkAltMsg1 scrut_ty)
+lintAlt mb_scrut_ty (LitAlt lit, _, rhs) = do
+   case mb_scrut_ty of
+     Just scrut_ty -> checkTys (literalType lit) scrut_ty (mkAltMsg1 scrut_ty)
+     Nothing -> return ()
    lintStgExpr rhs
 
-lintAlt scrut_ty (DataAlt con, args, rhs) = do
-    case splitTyConApp_maybe scrut_ty of
-      Just (tycon, tys_applied) | isAlgTyCon tycon &&
-                                  not (isNewTyCon tycon) -> do
-         let
-           cons    = tyConDataCons tycon
-           arg_tys = dataConInstArgTys con tys_applied
-                -- This does not work for existential constructors
+lintAlt mb_scrut_ty (DataAlt con, args, rhs) = do
+  case mb_scrut_ty of
+    Just scrut_ty ->
+      case splitTyConApp_maybe scrut_ty of
+        Just (tycon, tys_applied) | isAlgTyCon tycon &&
+                                    not (isNewTyCon tycon) -> do
+          let
+            cons    = tyConDataCons tycon
+            arg_tys = dataConInstArgTys con tys_applied
+                  -- This does not work for existential constructors
 
-         checkL (con `elem` cons) (mkAlgAltMsg2 scrut_ty con)
-         checkL (args `lengthIs` dataConRepArity con) (mkAlgAltMsg3 con args)
-         when (isVanillaDataCon con) $
-           mapM_ check (zipEqual "lintAlgAlt:stg" arg_tys args)
-         return ()
-      _ ->
-         addErrL (mkAltMsg1 scrut_ty)
+          checkL (con `elem` cons) (mkAlgAltMsg2 scrut_ty con)
+          checkL (args `lengthIs` dataConRepArity con) (mkAlgAltMsg3 con args)
+          when (isVanillaDataCon con) $
+            mapM_ check (zipEqual "lintAlgAlt:stg" arg_tys args)
+          return ()
+        _ -> addErrL (mkAltMsg1 scrut_ty)
+    _ -> return ()
 
-    addInScopeVars args $
-         lintStgExpr rhs
+  addInScopeVars args $
+        lintStgExpr rhs
   where
     check (ty, arg) = checkTys ty (idType arg) (mkAlgAltMsg4 ty arg)
 
